@@ -16,10 +16,35 @@ pub struct RoxyServer<E: PhpExecutor> {
     prompts: Vec<Prompt>,
 }
 
+/// Pre-discovered capabilities, shareable across server instances.
+#[derive(Clone)]
+pub struct DiscoverResult {
+    pub tools: Vec<Tool>,
+    pub resources: Vec<Resource>,
+    pub prompts: Vec<Prompt>,
+}
+
 impl<E: PhpExecutor + 'static> RoxyServer<E> {
     /// Create server and discover capabilities from PHP.
     pub async fn new(executor: E) -> anyhow::Result<Self> {
         info!("discovering capabilities from PHP...");
+        let discover = Self::discover_from(&executor).await?;
+        Ok(Self::from_cached(executor, discover))
+    }
+
+    /// Create server from pre-discovered capabilities (synchronous).
+    /// Used by the HTTP transport factory closure which cannot be async.
+    pub fn from_cached(executor: E, discover: DiscoverResult) -> Self {
+        Self {
+            executor,
+            tools: discover.tools,
+            resources: discover.resources,
+            prompts: discover.prompts,
+        }
+    }
+
+    /// Discover capabilities from the PHP backend and convert to MCP types.
+    pub async fn discover_from(executor: &E) -> anyhow::Result<DiscoverResult> {
         let discover = executor.discover().await?;
 
         let tools: Vec<Tool> = discover
@@ -75,8 +100,7 @@ impl<E: PhpExecutor + 'static> RoxyServer<E> {
             prompts.len()
         );
 
-        Ok(Self {
-            executor,
+        Ok(DiscoverResult {
             tools,
             resources,
             prompts,
