@@ -134,10 +134,10 @@ impl FastCgiExecutor {
             }
         };
 
-        if let Some(stderr) = &response.stderr {
-            if !stderr.is_empty() {
-                warn!("PHP stderr: {}", String::from_utf8_lossy(stderr));
-            }
+        if let Some(stderr) = &response.stderr
+            && !stderr.is_empty()
+        {
+            warn!("PHP stderr: {}", String::from_utf8_lossy(stderr));
         }
 
         let stdout = response.stdout.unwrap_or_default();
