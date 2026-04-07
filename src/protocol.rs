@@ -51,15 +51,21 @@ pub struct PhpDiscoverResponse {
 pub struct PhpToolDef {
     pub name: String,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub input_schema: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PhpResourceDef {
     pub uri: String,
     pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -70,6 +76,8 @@ pub struct PhpResourceDef {
 pub struct PhpPromptDef {
     pub name: String,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub arguments: Vec<PhpPromptArgument>,
@@ -78,6 +86,8 @@ pub struct PhpPromptDef {
 #[derive(Debug, Deserialize)]
 pub struct PhpPromptArgument {
     pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -257,6 +267,39 @@ mod tests {
         assert_eq!(json["type"], "call_tool");
         assert_eq!(json["elicitation_results"][0]["class"], "business");
         assert_eq!(json["context"]["step"], 1);
+    }
+
+    #[test]
+    fn test_discover_response_with_titles_and_output_schema() {
+        let json = r#"{
+            "tools": [{
+                "name": "book",
+                "title": "Book Flight",
+                "description": "Books a flight",
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object", "properties": {"id": {"type": "integer"}}}
+            }],
+            "resources": [{
+                "uri": "roxy://status",
+                "name": "status",
+                "title": "Server Status"
+            }],
+            "prompts": [{
+                "name": "greet",
+                "title": "Greeting",
+                "arguments": [{
+                    "name": "name",
+                    "title": "Person Name",
+                    "required": true
+                }]
+            }]
+        }"#;
+        let resp: PhpDiscoverResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.tools[0].title.as_deref(), Some("Book Flight"));
+        assert!(resp.tools[0].output_schema.is_some());
+        assert_eq!(resp.resources[0].title.as_deref(), Some("Server Status"));
+        assert_eq!(resp.prompts[0].title.as_deref(), Some("Greeting"));
+        assert_eq!(resp.prompts[0].arguments[0].title.as_deref(), Some("Person Name"));
     }
 
     #[test]
