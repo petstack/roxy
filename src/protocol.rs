@@ -236,14 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn test_php_call_result_parses_error() {
+    fn test_upstream_call_result_parses_error() {
         let json = br#"{"error": {"code": 400, "message": "Bad request"}}"#;
         let result = UpstreamCallResult::parse(json).unwrap();
         assert!(matches!(result, UpstreamCallResult::Error(_)));
     }
 
     #[test]
-    fn test_php_call_result_parses_content() {
+    fn test_upstream_call_result_parses_content() {
         let json = br#"{"content": [{"type": "text", "text": "OK"}]}"#;
         let result = UpstreamCallResult::parse(json).unwrap();
         assert!(matches!(result, UpstreamCallResult::Content(_)));
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_php_call_result_parses_elicit() {
+    fn test_upstream_call_result_parses_elicit() {
         let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}, "context": {"s": 1}}}"#;
         let result = UpstreamCallResult::parse(json).unwrap();
         match result {
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_php_call_result_parses_elicit_without_context() {
+    fn test_upstream_call_result_parses_elicit_without_context() {
         let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}}}"#;
         let result = UpstreamCallResult::parse(json).unwrap();
         match result {

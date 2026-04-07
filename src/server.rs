@@ -200,7 +200,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         let mut elicit_context: Option<serde_json::Value> = None;
 
         loop {
-            let php_request = UpstreamRequest::CallTool {
+            let upstream_request = UpstreamRequest::CallTool {
                 name: &request.name,
                 arguments: request.arguments.as_ref(),
                 elicitation_results: if elicitation_results.is_empty() {
@@ -213,12 +213,12 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
             let envelope = UpstreamEnvelope {
                 session_id: session_id_ref,
                 request_id: &request_id,
-                request: php_request,
+                request: upstream_request,
             };
 
             let response = self.executor.execute(&envelope).await.map_err(|e| {
-                error!("PHP executor error: {e}");
-                McpError::internal_error(format!("PHP error: {e}"), None)
+                error!("upstream executor error: {e}");
+                McpError::internal_error(format!("upstream error: {e}"), None)
             })?;
 
             match response {
@@ -288,7 +288,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                                 request: cancel_request,
                             };
                             if let Err(e) = self.executor.execute(&cancel_envelope).await {
-                                warn!("failed to notify PHP about elicitation cancellation: {e}");
+                                warn!("failed to notify upstream about elicitation cancellation: {e}");
                             }
 
                             let msg = match action {
@@ -325,18 +325,18 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let request_id = uuid::Uuid::new_v4().to_string();
-        let php_request = UpstreamRequest::ReadResource {
+        let upstream_request = UpstreamRequest::ReadResource {
             uri: &request.uri,
         };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
             request_id: &request_id,
-            request: php_request,
+            request: upstream_request,
         };
 
         let response = self.executor.execute(&envelope).await.map_err(|e| {
-            error!("PHP executor error: {e}");
-            McpError::internal_error(format!("PHP error: {e}"), None)
+            error!("upstream executor error: {e}");
+            McpError::internal_error(format!("upstream error: {e}"), None)
         })?;
 
         match response {
@@ -383,19 +383,19 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let request_id = uuid::Uuid::new_v4().to_string();
-        let php_request = UpstreamRequest::GetPrompt {
+        let upstream_request = UpstreamRequest::GetPrompt {
             name: &request.name,
             arguments: request.arguments.as_ref(),
         };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
             request_id: &request_id,
-            request: php_request,
+            request: upstream_request,
         };
 
         let response = self.executor.execute(&envelope).await.map_err(|e| {
-            error!("PHP executor error: {e}");
-            McpError::internal_error(format!("PHP error: {e}"), None)
+            error!("upstream executor error: {e}");
+            McpError::internal_error(format!("upstream error: {e}"), None)
         })?;
 
         match response {

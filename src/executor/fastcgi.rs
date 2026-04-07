@@ -159,8 +159,8 @@ impl UpstreamExecutor for FastCgiExecutor {
     async fn execute(&self, request: &UpstreamEnvelope<'_>) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
         let response_bytes = self.send_request(&body).await?;
-        debug!("PHP response: {}", String::from_utf8_lossy(&response_bytes));
-        UpstreamCallResult::parse(&response_bytes).context("failed to parse PHP response")
+        debug!("FastCGI response: {}", String::from_utf8_lossy(&response_bytes));
+        UpstreamCallResult::parse(&response_bytes).context("failed to parse FastCGI response")
     }
 
     async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
@@ -173,11 +173,11 @@ impl UpstreamExecutor for FastCgiExecutor {
         let body = serde_json::to_vec(&envelope)?;
         let response_bytes = self.send_request(&body).await?;
         debug!(
-            "PHP discover response: {}",
+            "FastCGI discover response: {}",
             String::from_utf8_lossy(&response_bytes)
         );
         let response: UpstreamDiscoverResponse = serde_json::from_slice(&response_bytes)
-            .context("failed to parse PHP discover response")?;
+            .context("failed to parse FastCGI discover response")?;
         Ok(response)
     }
 }
