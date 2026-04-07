@@ -161,6 +161,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                     .into_iter()
                     .map(|item| match item {
                         PhpContent::Text { text } => Content::text(text),
+                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in call_tool"),
                     })
                     .collect();
                 Ok(CallToolResult::success(content))
@@ -168,6 +169,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
             PhpCallResult::Error(e) => {
                 Ok(CallToolResult::error(vec![Content::text(e.error.message)]))
             }
+            PhpCallResult::Elicit(_) => unimplemented!("elicit in call_tool"),
         }
     }
 
@@ -211,6 +213,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                         PhpContent::Text { text } => {
                             ResourceContents::text(text, request.uri.clone())
                         }
+                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in read_resource"),
                     })
                     .collect();
                 Ok(ReadResourceResult::new(contents))
@@ -218,6 +221,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
             PhpCallResult::Error(e) => {
                 Err(McpError::resource_not_found(e.error.message, None))
             }
+            PhpCallResult::Elicit(_) => unimplemented!("elicit in read_resource"),
         }
     }
 
@@ -262,6 +266,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                         PhpContent::Text { text } => {
                             PromptMessage::new_text(PromptMessageRole::Assistant, text)
                         }
+                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in get_prompt"),
                     })
                     .collect();
                 Ok(GetPromptResult::new(messages))
@@ -269,6 +274,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
             PhpCallResult::Error(e) => {
                 Err(McpError::invalid_params(e.error.message, None))
             }
+            PhpCallResult::Elicit(_) => unimplemented!("elicit in get_prompt"),
         }
     }
 }

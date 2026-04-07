@@ -97,12 +97,24 @@ pub struct PhpPromptArgument {
 #[derive(Debug, Deserialize)]
 pub struct PhpContentResponse {
     pub content: Vec<PhpContent>,
+    #[serde(default)]
+    pub structured_content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PhpContent {
     Text { text: String },
+    ResourceLink {
+        uri: String,
+        name: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        mime_type: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,18 +128,30 @@ pub struct PhpError {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PhpElicitResponse {
+    pub message: String,
+    pub schema: serde_json::Value,
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
+}
+
 /// Result of a tool/resource/prompt call (not discover).
-/// Parsed manually: if "error" key present -> Error, else -> Content.
+/// Parsed manually: if "elicit" key present -> Elicit, if "error" key present -> Error, else -> Content.
 #[derive(Debug)]
 pub enum PhpCallResult {
     Content(PhpContentResponse),
     Error(PhpErrorResponse),
+    Elicit(PhpElicitResponse),
 }
 
 impl PhpCallResult {
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        if value.get("error").is_some() {
+        if value.get("elicit").is_some() {
+            let inner = value["elicit"].clone();
+            Ok(Self::Elicit(serde_json::from_value(inner)?))
+        } else if value.get("error").is_some() {
             Ok(Self::Error(serde_json::from_value(value)?))
         } else {
             Ok(Self::Content(serde_json::from_value(value)?))
@@ -199,6 +223,7 @@ mod tests {
         assert_eq!(resp.content.len(), 1);
         match &resp.content[0] {
             PhpContent::Text { text } => assert_eq!(text, "Hello"),
+            _ => panic!("expected Text variant"),
         }
     }
 
@@ -300,6 +325,53 @@ mod tests {
         assert_eq!(resp.resources[0].title.as_deref(), Some("Server Status"));
         assert_eq!(resp.prompts[0].title.as_deref(), Some("Greeting"));
         assert_eq!(resp.prompts[0].arguments[0].title.as_deref(), Some("Person Name"));
+    }
+
+    #[test]
+    fn test_resource_link_content_deserialization() {
+        let json = r#"{"content": [
+            {"type": "text", "text": "See details:"},
+            {"type": "resource_link", "uri": "roxy://b/1", "name": "booking-1", "title": "Booking #1"}
+        ]}"#;
+        let resp: PhpContentResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.content.len(), 2);
+        assert!(matches!(&resp.content[0], PhpContent::Text { .. }));
+        assert!(matches!(&resp.content[1], PhpContent::ResourceLink { uri, .. } if uri == "roxy://b/1"));
+    }
+
+    #[test]
+    fn test_structured_content_deserialization() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "Done"}],
+            "structured_content": {"id": 42, "status": "ok"}
+        }"#;
+        let resp: PhpContentResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.structured_content.as_ref().unwrap()["id"], 42);
+    }
+
+    #[test]
+    fn test_php_call_result_parses_elicit() {
+        let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}, "context": {"s": 1}}}"#;
+        let result = PhpCallResult::parse(json).unwrap();
+        match result {
+            PhpCallResult::Elicit(e) => {
+                assert_eq!(e.message, "Choose");
+                assert_eq!(e.context.as_ref().unwrap()["s"], 1);
+            }
+            _ => panic!("expected Elicit variant"),
+        }
+    }
+
+    #[test]
+    fn test_php_call_result_parses_elicit_without_context() {
+        let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}}}"#;
+        let result = PhpCallResult::parse(json).unwrap();
+        match result {
+            PhpCallResult::Elicit(e) => {
+                assert!(e.context.is_none());
+            }
+            _ => panic!("expected Elicit variant"),
+        }
     }
 
     #[test]
