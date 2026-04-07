@@ -4,12 +4,12 @@ use rmcp::{
 };
 use tracing::{error, info, warn};
 
-use crate::executor::PhpExecutor;
-use crate::protocol::{PhpCallResult, PhpContent, PhpEnvelope, PhpRequest};
+use crate::executor::UpstreamExecutor;
+use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, UpstreamRequest};
 
 type McpError = rmcp::ErrorData;
 
-pub struct RoxyServer<E: PhpExecutor> {
+pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
     tools: Vec<Tool>,
     resources: Vec<Resource>,
@@ -24,7 +24,7 @@ pub struct DiscoverResult {
     pub prompts: Vec<Prompt>,
 }
 
-impl<E: PhpExecutor + 'static> RoxyServer<E> {
+impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
     /// Create server and discover capabilities from PHP.
     pub async fn new(executor: E) -> anyhow::Result<Self> {
         info!("discovering capabilities from PHP...");
@@ -136,10 +136,10 @@ fn extract_session_id(context: &rmcp::service::RequestContext<rmcp::RoleServer>)
         .map(|s| s.to_owned())
 }
 
-fn map_php_content(item: PhpContent) -> Content {
+fn map_upstream_content(item: UpstreamContent) -> Content {
     match item {
-        PhpContent::Text { text } => Content::text(text),
-        PhpContent::ResourceLink {
+        UpstreamContent::Text { text } => Content::text(text),
+        UpstreamContent::ResourceLink {
             uri,
             name,
             title,
@@ -161,7 +161,7 @@ fn map_php_content(item: PhpContent) -> Content {
     }
 }
 
-impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
+impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -200,7 +200,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
         let mut elicit_context: Option<serde_json::Value> = None;
 
         loop {
-            let php_request = PhpRequest::CallTool {
+            let php_request = UpstreamRequest::CallTool {
                 name: &request.name,
                 arguments: request.arguments.as_ref(),
                 elicitation_results: if elicitation_results.is_empty() {
@@ -210,7 +210,7 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                 },
                 context: elicit_context.as_ref(),
             };
-            let envelope = PhpEnvelope {
+            let envelope = UpstreamEnvelope {
                 session_id: session_id_ref,
                 request_id: &request_id,
                 request: php_request,
@@ -222,9 +222,9 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
             })?;
 
             match response {
-                PhpCallResult::Content(c) => {
+                UpstreamCallResult::Content(c) => {
                     let content: Vec<Content> =
-                        c.content.into_iter().map(map_php_content).collect();
+                        c.content.into_iter().map(map_upstream_content).collect();
 
                     let mut result = CallToolResult::success(content);
                     if c.structured_content.is_some() {
@@ -233,10 +233,10 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
 
                     return Ok(result);
                 }
-                PhpCallResult::Error(e) => {
+                UpstreamCallResult::Error(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
                 }
-                PhpCallResult::Elicit(elicit) => {
+                UpstreamCallResult::Elicit(elicit) => {
                     let schema: ElicitationSchema =
                         serde_json::from_value(elicit.schema.clone()).map_err(|e| {
                             error!("invalid elicitation schema from PHP: {e}");
@@ -277,12 +277,12 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                             };
 
                             // Notify PHP about cancellation
-                            let cancel_request = PhpRequest::ElicitationCancelled {
+                            let cancel_request = UpstreamRequest::ElicitationCancelled {
                                 name: &request.name,
                                 action: action_str,
                                 context: elicit.context.as_ref(),
                             };
-                            let cancel_envelope = PhpEnvelope {
+                            let cancel_envelope = UpstreamEnvelope {
                                 session_id: session_id_ref,
                                 request_id: &request_id,
                                 request: cancel_request,
@@ -325,10 +325,10 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let request_id = uuid::Uuid::new_v4().to_string();
-        let php_request = PhpRequest::ReadResource {
+        let php_request = UpstreamRequest::ReadResource {
             uri: &request.uri,
         };
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
             request_id: &request_id,
             request: php_request,
@@ -340,23 +340,23 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
         })?;
 
         match response {
-            PhpCallResult::Content(c) => {
+            UpstreamCallResult::Content(c) => {
                 let contents: Vec<ResourceContents> = c
                     .content
                     .into_iter()
                     .map(|item| match item {
-                        PhpContent::Text { text } => {
+                        UpstreamContent::Text { text } => {
                             ResourceContents::text(text, request.uri.clone())
                         }
-                        PhpContent::ResourceLink { .. } => {
+                        UpstreamContent::ResourceLink { .. } => {
                             ResourceContents::text("[resource link]".to_string(), request.uri.clone())
                         }
                     })
                     .collect();
                 Ok(ReadResourceResult::new(contents))
             }
-            PhpCallResult::Error(e) => Err(McpError::resource_not_found(e.error.message, None)),
-            PhpCallResult::Elicit(_) => {
+            UpstreamCallResult::Error(e) => Err(McpError::resource_not_found(e.error.message, None)),
+            UpstreamCallResult::Elicit(_) => {
                 Err(McpError::internal_error("elicitation not supported in read_resource", None))
             }
         }
@@ -383,11 +383,11 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let request_id = uuid::Uuid::new_v4().to_string();
-        let php_request = PhpRequest::GetPrompt {
+        let php_request = UpstreamRequest::GetPrompt {
             name: &request.name,
             arguments: request.arguments.as_ref(),
         };
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
             request_id: &request_id,
             request: php_request,
@@ -399,15 +399,15 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
         })?;
 
         match response {
-            PhpCallResult::Content(c) => {
+            UpstreamCallResult::Content(c) => {
                 let messages: Vec<PromptMessage> = c
                     .content
                     .into_iter()
                     .map(|item| match item {
-                        PhpContent::Text { text } => {
+                        UpstreamContent::Text { text } => {
                             PromptMessage::new_text(PromptMessageRole::Assistant, text)
                         }
-                        PhpContent::ResourceLink {
+                        UpstreamContent::ResourceLink {
                             uri,
                             name,
                             title,
@@ -433,8 +433,8 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                     .collect();
                 Ok(GetPromptResult::new(messages))
             }
-            PhpCallResult::Error(e) => Err(McpError::invalid_params(e.error.message, None)),
-            PhpCallResult::Elicit(_) => {
+            UpstreamCallResult::Error(e) => Err(McpError::invalid_params(e.error.message, None)),
+            UpstreamCallResult::Elicit(_) => {
                 Err(McpError::internal_error("elicitation not supported in get_prompt", None))
             }
         }

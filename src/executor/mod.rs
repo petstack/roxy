@@ -2,30 +2,30 @@ pub mod fastcgi;
 
 use std::sync::Arc;
 
-use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpEnvelope};
+use crate::protocol::{UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope};
 
-pub trait PhpExecutor: Send + Sync {
+pub trait UpstreamExecutor: Send + Sync {
     fn execute(
         &self,
-        request: &PhpEnvelope<'_>,
-    ) -> impl std::future::Future<Output = anyhow::Result<PhpCallResult>> + Send;
+        request: &UpstreamEnvelope<'_>,
+    ) -> impl std::future::Future<Output = anyhow::Result<UpstreamCallResult>> + Send;
 
     fn discover(
         &self,
-    ) -> impl std::future::Future<Output = anyhow::Result<PhpDiscoverResponse>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<UpstreamDiscoverResponse>> + Send;
 }
 
-impl<T: PhpExecutor> PhpExecutor for Arc<T> {
+impl<T: UpstreamExecutor> UpstreamExecutor for Arc<T> {
     fn execute(
         &self,
-        request: &PhpEnvelope<'_>,
-    ) -> impl std::future::Future<Output = anyhow::Result<PhpCallResult>> + Send {
+        request: &UpstreamEnvelope<'_>,
+    ) -> impl std::future::Future<Output = anyhow::Result<UpstreamCallResult>> + Send {
         (**self).execute(request)
     }
 
     fn discover(
         &self,
-    ) -> impl std::future::Future<Output = anyhow::Result<PhpDiscoverResponse>> + Send {
+    ) -> impl std::future::Future<Output = anyhow::Result<UpstreamDiscoverResponse>> + Send {
         (**self).discover()
     }
 }

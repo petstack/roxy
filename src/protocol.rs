@@ -1,16 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-pub struct PhpEnvelope<'a> {
+pub struct UpstreamEnvelope<'a> {
     pub session_id: Option<&'a str>,
     pub request_id: &'a str,
     #[serde(flatten)]
-    pub request: PhpRequest<'a>,
+    pub request: UpstreamRequest<'a>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PhpRequest<'a> {
+pub enum UpstreamRequest<'a> {
     Discover,
     CallTool {
         name: &'a str,
@@ -38,17 +38,17 @@ pub enum PhpRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpDiscoverResponse {
+pub struct UpstreamDiscoverResponse {
     #[serde(default)]
-    pub tools: Vec<PhpToolDef>,
+    pub tools: Vec<UpstreamToolDef>,
     #[serde(default)]
-    pub resources: Vec<PhpResourceDef>,
+    pub resources: Vec<UpstreamResourceDef>,
     #[serde(default)]
-    pub prompts: Vec<PhpPromptDef>,
+    pub prompts: Vec<UpstreamPromptDef>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpToolDef {
+pub struct UpstreamToolDef {
     pub name: String,
     #[serde(default)]
     pub title: Option<String>,
@@ -61,7 +61,7 @@ pub struct PhpToolDef {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpResourceDef {
+pub struct UpstreamResourceDef {
     pub uri: String,
     pub name: String,
     #[serde(default)]
@@ -73,18 +73,18 @@ pub struct PhpResourceDef {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpPromptDef {
+pub struct UpstreamPromptDef {
     pub name: String,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub arguments: Vec<PhpPromptArgument>,
+    pub arguments: Vec<UpstreamPromptArgument>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpPromptArgument {
+pub struct UpstreamPromptArgument {
     pub name: String,
     #[serde(default)]
     pub title: Option<String>,
@@ -95,15 +95,15 @@ pub struct PhpPromptArgument {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpContentResponse {
-    pub content: Vec<PhpContent>,
+pub struct UpstreamContentResponse {
+    pub content: Vec<UpstreamContent>,
     #[serde(default)]
     pub structured_content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PhpContent {
+pub enum UpstreamContent {
     Text { text: String },
     ResourceLink {
         uri: String,
@@ -118,18 +118,18 @@ pub enum PhpContent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpErrorResponse {
-    pub error: PhpError,
+pub struct UpstreamErrorResponse {
+    pub error: UpstreamError,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpError {
+pub struct UpstreamError {
     pub code: i32,
     pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PhpElicitResponse {
+pub struct UpstreamElicitResponse {
     pub message: String,
     pub schema: serde_json::Value,
     #[serde(default)]
@@ -139,13 +139,13 @@ pub struct PhpElicitResponse {
 /// Result of a tool/resource/prompt call (not discover).
 /// Parsed manually: if "elicit" key present -> Elicit, if "error" key present -> Error, else -> Content.
 #[derive(Debug)]
-pub enum PhpCallResult {
-    Content(PhpContentResponse),
-    Error(PhpErrorResponse),
-    Elicit(PhpElicitResponse),
+pub enum UpstreamCallResult {
+    Content(UpstreamContentResponse),
+    Error(UpstreamErrorResponse),
+    Elicit(UpstreamElicitResponse),
 }
 
-impl PhpCallResult {
+impl UpstreamCallResult {
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
         if value.get("elicit").is_some() {
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_discover_request_serialization() {
-        let req = PhpRequest::Discover;
+        let req = UpstreamRequest::Discover;
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"type":"discover"}"#);
     }
@@ -174,7 +174,7 @@ mod tests {
     fn test_call_tool_request_serialization() {
         let mut args = serde_json::Map::new();
         args.insert("city".into(), serde_json::Value::String("Moscow".into()));
-        let req = PhpRequest::CallTool {
+        let req = UpstreamRequest::CallTool {
             name: "get_weather",
             arguments: Some(&args),
             elicitation_results: None,
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_call_tool_no_arguments() {
-        let req = PhpRequest::CallTool {
+        let req = UpstreamRequest::CallTool {
             name: "ping",
             arguments: None,
             elicitation_results: None,
@@ -207,7 +207,7 @@ mod tests {
             "resources": [{"uri": "file:///config.yaml", "name": "config"}],
             "prompts": [{"name": "review", "description": "Code review", "arguments": [{"name": "lang", "required": true}]}]
         }"#;
-        let resp: PhpDiscoverResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamDiscoverResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.tools.len(), 1);
         assert_eq!(resp.tools[0].name, "get_weather");
         assert_eq!(resp.resources.len(), 1);
@@ -219,10 +219,10 @@ mod tests {
     #[test]
     fn test_content_response_deserialization() {
         let json = r#"{"content": [{"type": "text", "text": "Hello"}]}"#;
-        let resp: PhpContentResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.content.len(), 1);
         match &resp.content[0] {
-            PhpContent::Text { text } => assert_eq!(text, "Hello"),
+            UpstreamContent::Text { text } => assert_eq!(text, "Hello"),
             _ => panic!("expected Text variant"),
         }
     }
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_error_response_deserialization() {
         let json = r#"{"error": {"code": 404, "message": "Tool not found"}}"#;
-        let resp: PhpErrorResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamErrorResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.error.code, 404);
         assert_eq!(resp.error.message, "Tool not found");
     }
@@ -238,23 +238,23 @@ mod tests {
     #[test]
     fn test_php_call_result_parses_error() {
         let json = br#"{"error": {"code": 400, "message": "Bad request"}}"#;
-        let result = PhpCallResult::parse(json).unwrap();
-        assert!(matches!(result, PhpCallResult::Error(_)));
+        let result = UpstreamCallResult::parse(json).unwrap();
+        assert!(matches!(result, UpstreamCallResult::Error(_)));
     }
 
     #[test]
     fn test_php_call_result_parses_content() {
         let json = br#"{"content": [{"type": "text", "text": "OK"}]}"#;
-        let result = PhpCallResult::parse(json).unwrap();
-        assert!(matches!(result, PhpCallResult::Content(_)));
+        let result = UpstreamCallResult::parse(json).unwrap();
+        assert!(matches!(result, UpstreamCallResult::Content(_)));
     }
 
     #[test]
     fn test_envelope_serialization() {
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: Some("sess-1"),
             request_id: "req-1",
-            request: PhpRequest::Discover,
+            request: UpstreamRequest::Discover,
         };
         let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
         assert_eq!(json["session_id"], "sess-1");
@@ -264,10 +264,10 @@ mod tests {
 
     #[test]
     fn test_envelope_null_session() {
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: None,
             request_id: "req-2",
-            request: PhpRequest::Discover,
+            request: UpstreamRequest::Discover,
         };
         let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
         assert!(json["session_id"].is_null());
@@ -278,10 +278,10 @@ mod tests {
     fn test_call_tool_with_elicitation_context() {
         let results = vec![serde_json::json!({"class": "business"})];
         let context = serde_json::json!({"step": 1});
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: Some("s1"),
             request_id: "r1",
-            request: PhpRequest::CallTool {
+            request: UpstreamRequest::CallTool {
                 name: "book",
                 arguments: None,
                 elicitation_results: Some(&results),
@@ -319,7 +319,7 @@ mod tests {
                 }]
             }]
         }"#;
-        let resp: PhpDiscoverResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamDiscoverResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.tools[0].title.as_deref(), Some("Book Flight"));
         assert!(resp.tools[0].output_schema.is_some());
         assert_eq!(resp.resources[0].title.as_deref(), Some("Server Status"));
@@ -333,10 +333,10 @@ mod tests {
             {"type": "text", "text": "See details:"},
             {"type": "resource_link", "uri": "roxy://b/1", "name": "booking-1", "title": "Booking #1"}
         ]}"#;
-        let resp: PhpContentResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.content.len(), 2);
-        assert!(matches!(&resp.content[0], PhpContent::Text { .. }));
-        assert!(matches!(&resp.content[1], PhpContent::ResourceLink { uri, .. } if uri == "roxy://b/1"));
+        assert!(matches!(&resp.content[0], UpstreamContent::Text { .. }));
+        assert!(matches!(&resp.content[1], UpstreamContent::ResourceLink { uri, .. } if uri == "roxy://b/1"));
     }
 
     #[test]
@@ -345,16 +345,16 @@ mod tests {
             "content": [{"type": "text", "text": "Done"}],
             "structured_content": {"id": 42, "status": "ok"}
         }"#;
-        let resp: PhpContentResponse = serde_json::from_str(json).unwrap();
+        let resp: UpstreamContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.structured_content.as_ref().unwrap()["id"], 42);
     }
 
     #[test]
     fn test_php_call_result_parses_elicit() {
         let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}, "context": {"s": 1}}}"#;
-        let result = PhpCallResult::parse(json).unwrap();
+        let result = UpstreamCallResult::parse(json).unwrap();
         match result {
-            PhpCallResult::Elicit(e) => {
+            UpstreamCallResult::Elicit(e) => {
                 assert_eq!(e.message, "Choose");
                 assert_eq!(e.context.as_ref().unwrap()["s"], 1);
             }
@@ -365,9 +365,9 @@ mod tests {
     #[test]
     fn test_php_call_result_parses_elicit_without_context() {
         let json = br#"{"elicit": {"message": "Choose", "schema": {"type": "object"}}}"#;
-        let result = PhpCallResult::parse(json).unwrap();
+        let result = UpstreamCallResult::parse(json).unwrap();
         match result {
-            PhpCallResult::Elicit(e) => {
+            UpstreamCallResult::Elicit(e) => {
                 assert!(e.context.is_none());
             }
             _ => panic!("expected Elicit variant"),
@@ -377,10 +377,10 @@ mod tests {
     #[test]
     fn test_elicitation_cancelled_serialization() {
         let ctx = serde_json::json!({"step": 1});
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: Some("s1"),
             request_id: "r1",
-            request: PhpRequest::ElicitationCancelled {
+            request: UpstreamRequest::ElicitationCancelled {
                 name: "book",
                 action: "decline",
                 context: Some(&ctx),

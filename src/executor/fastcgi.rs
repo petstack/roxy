@@ -6,9 +6,9 @@ use tokio_util::compat::Compat;
 use tracing::{debug, warn};
 
 use crate::config::FcgiAddress;
-use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpEnvelope, PhpRequest};
+use crate::protocol::{UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest};
 
-use super::PhpExecutor;
+use super::UpstreamExecutor;
 
 // --- Pool manager types ---
 
@@ -155,20 +155,20 @@ fn extract_body(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-impl PhpExecutor for FastCgiExecutor {
-    async fn execute(&self, request: &PhpEnvelope<'_>) -> anyhow::Result<PhpCallResult> {
+impl UpstreamExecutor for FastCgiExecutor {
+    async fn execute(&self, request: &UpstreamEnvelope<'_>) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
         let response_bytes = self.send_request(&body).await?;
         debug!("PHP response: {}", String::from_utf8_lossy(&response_bytes));
-        PhpCallResult::parse(&response_bytes).context("failed to parse PHP response")
+        UpstreamCallResult::parse(&response_bytes).context("failed to parse PHP response")
     }
 
-    async fn discover(&self) -> anyhow::Result<PhpDiscoverResponse> {
+    async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let envelope = PhpEnvelope {
+        let envelope = UpstreamEnvelope {
             session_id: None,
             request_id: &request_id,
-            request: PhpRequest::Discover,
+            request: UpstreamRequest::Discover,
         };
         let body = serde_json::to_vec(&envelope)?;
         let response_bytes = self.send_request(&body).await?;
@@ -176,7 +176,7 @@ impl PhpExecutor for FastCgiExecutor {
             "PHP discover response: {}",
             String::from_utf8_lossy(&response_bytes)
         );
-        let response: PhpDiscoverResponse = serde_json::from_slice(&response_bytes)
+        let response: UpstreamDiscoverResponse = serde_json::from_slice(&response_bytes)
             .context("failed to parse PHP discover response")?;
         Ok(response)
     }
