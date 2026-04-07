@@ -141,6 +141,8 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
         let php_request = PhpRequest::CallTool {
             name: &request.name,
             arguments: request.arguments.as_ref(),
+            elicitation_results: None,
+            context: None,
         };
 
         let response = self

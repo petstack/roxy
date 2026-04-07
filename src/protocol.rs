@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
+pub struct PhpEnvelope<'a> {
+    pub session_id: Option<&'a str>,
+    pub request_id: &'a str,
+    #[serde(flatten)]
+    pub request: PhpRequest<'a>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PhpRequest<'a> {
     Discover,
@@ -8,6 +16,10 @@ pub enum PhpRequest<'a> {
         name: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<&'a serde_json::Map<String, serde_json::Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elicitation_results: Option<&'a [serde_json::Value]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<&'a serde_json::Value>,
     },
     ReadResource {
         uri: &'a str,
@@ -16,6 +28,12 @@ pub enum PhpRequest<'a> {
         name: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    },
+    ElicitationCancelled {
+        name: &'a str,
+        action: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<&'a serde_json::Value>,
     },
 }
 
@@ -125,11 +143,15 @@ mod tests {
         let req = PhpRequest::CallTool {
             name: "get_weather",
             arguments: Some(&args),
+            elicitation_results: None,
+            context: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["type"], "call_tool");
         assert_eq!(json["name"], "get_weather");
         assert_eq!(json["arguments"]["city"], "Moscow");
+        assert!(json.get("elicitation_results").is_none());
+        assert!(json.get("context").is_none());
     }
 
     #[test]
@@ -137,6 +159,8 @@ mod tests {
         let req = PhpRequest::CallTool {
             name: "ping",
             arguments: None,
+            elicitation_results: None,
+            context: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert!(json.get("arguments").is_none());
@@ -188,5 +212,69 @@ mod tests {
         let json = br#"{"content": [{"type": "text", "text": "OK"}]}"#;
         let result = PhpCallResult::parse(json).unwrap();
         assert!(matches!(result, PhpCallResult::Content(_)));
+    }
+
+    #[test]
+    fn test_envelope_serialization() {
+        let envelope = PhpEnvelope {
+            session_id: Some("sess-1"),
+            request_id: "req-1",
+            request: PhpRequest::Discover,
+        };
+        let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["session_id"], "sess-1");
+        assert_eq!(json["request_id"], "req-1");
+        assert_eq!(json["type"], "discover");
+    }
+
+    #[test]
+    fn test_envelope_null_session() {
+        let envelope = PhpEnvelope {
+            session_id: None,
+            request_id: "req-2",
+            request: PhpRequest::Discover,
+        };
+        let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
+        assert!(json["session_id"].is_null());
+        assert_eq!(json["request_id"], "req-2");
+    }
+
+    #[test]
+    fn test_call_tool_with_elicitation_context() {
+        let results = vec![serde_json::json!({"class": "business"})];
+        let context = serde_json::json!({"step": 1});
+        let envelope = PhpEnvelope {
+            session_id: Some("s1"),
+            request_id: "r1",
+            request: PhpRequest::CallTool {
+                name: "book",
+                arguments: None,
+                elicitation_results: Some(&results),
+                context: Some(&context),
+            },
+        };
+        let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["type"], "call_tool");
+        assert_eq!(json["elicitation_results"][0]["class"], "business");
+        assert_eq!(json["context"]["step"], 1);
+    }
+
+    #[test]
+    fn test_elicitation_cancelled_serialization() {
+        let ctx = serde_json::json!({"step": 1});
+        let envelope = PhpEnvelope {
+            session_id: Some("s1"),
+            request_id: "r1",
+            request: PhpRequest::ElicitationCancelled {
+                name: "book",
+                action: "decline",
+                context: Some(&ctx),
+            },
+        };
+        let json: serde_json::Value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["type"], "elicitation_cancelled");
+        assert_eq!(json["name"], "book");
+        assert_eq!(json["action"], "decline");
+        assert_eq!(json["context"]["step"], 1);
     }
 }
