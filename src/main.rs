@@ -38,13 +38,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("roxy starting");
     info!("transport: {:?}", config.transport);
-    info!("php-fpm: {}", config.php_fpm);
-    info!("entrypoint: {}", config.php_entrypoint);
+    info!("upstream: {}", config.upstream);
 
-    let address = FcgiAddress::parse(&config.php_fpm);
+    let address = FcgiAddress::parse(&config.upstream);
+    let entrypoint = config.upstream_entrypoint.clone()
+        .expect("--upstream-entrypoint is required for FastCGI upstream");
     let executor = Arc::new(FastCgiExecutor::new(
         &address,
-        config.php_entrypoint.clone(),
+        entrypoint,
         config.pool_size,
     )?);
 
