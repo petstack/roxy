@@ -6,7 +6,7 @@ use tokio_util::compat::Compat;
 use tracing::{debug, warn};
 
 use crate::config::FcgiAddress;
-use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpRequest};
+use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpEnvelope, PhpRequest};
 
 use super::PhpExecutor;
 
@@ -156,7 +156,7 @@ fn extract_body(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 impl PhpExecutor for FastCgiExecutor {
-    async fn execute(&self, request: &PhpRequest<'_>) -> anyhow::Result<PhpCallResult> {
+    async fn execute(&self, request: &PhpEnvelope<'_>) -> anyhow::Result<PhpCallResult> {
         let body = serde_json::to_vec(request)?;
         let response_bytes = self.send_request(&body).await?;
         debug!("PHP response: {}", String::from_utf8_lossy(&response_bytes));
@@ -164,7 +164,13 @@ impl PhpExecutor for FastCgiExecutor {
     }
 
     async fn discover(&self) -> anyhow::Result<PhpDiscoverResponse> {
-        let body = serde_json::to_vec(&PhpRequest::Discover)?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let envelope = PhpEnvelope {
+            session_id: None,
+            request_id: &request_id,
+            request: PhpRequest::Discover,
+        };
+        let body = serde_json::to_vec(&envelope)?;
         let response_bytes = self.send_request(&body).await?;
         debug!(
             "PHP discover response: {}",

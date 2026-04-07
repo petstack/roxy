@@ -2,10 +2,10 @@ use rmcp::{
     ServerHandler,
     model::*,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::executor::PhpExecutor;
-use crate::protocol::{PhpCallResult, PhpContent, PhpRequest};
+use crate::protocol::{PhpCallResult, PhpContent, PhpEnvelope, PhpRequest};
 
 type McpError = rmcp::ErrorData;
 
@@ -52,7 +52,14 @@ impl<E: PhpExecutor + 'static> RoxyServer<E> {
             .into_iter()
             .map(|t| {
                 let schema = t.input_schema.unwrap_or_default();
-                Tool::new(t.name, t.description.unwrap_or_default(), schema)
+                let mut tool = Tool::new(t.name, t.description.unwrap_or_default(), schema);
+                if let Some(title) = t.title {
+                    tool = tool.with_title(title);
+                }
+                if let Some(output) = t.output_schema {
+                    tool = tool.with_raw_output_schema(std::sync::Arc::new(output));
+                }
+                tool
             })
             .collect();
 
@@ -61,6 +68,9 @@ impl<E: PhpExecutor + 'static> RoxyServer<E> {
             .into_iter()
             .map(|r| {
                 let mut raw = RawResource::new(r.uri, r.name);
+                if let Some(title) = r.title {
+                    raw = raw.with_title(title);
+                }
                 if let Some(desc) = r.description {
                     raw.description = Some(desc);
                 }
@@ -74,23 +84,32 @@ impl<E: PhpExecutor + 'static> RoxyServer<E> {
         let prompts: Vec<Prompt> = discover
             .prompts
             .into_iter()
-            .map(|p| Prompt::new(
-                p.name,
-                p.description,
-                Some(
-                    p.arguments
-                        .into_iter()
-                        .map(|a| {
-                            let mut arg = PromptArgument::new(a.name);
-                            if let Some(desc) = a.description {
-                                arg = arg.with_description(desc);
-                            }
-                            arg = arg.with_required(a.required);
-                            arg
-                        })
-                        .collect(),
-                ),
-            ))
+            .map(|p| {
+                let mut prompt = Prompt::new(
+                    p.name,
+                    p.description,
+                    Some(
+                        p.arguments
+                            .into_iter()
+                            .map(|a| {
+                                let mut arg = PromptArgument::new(a.name);
+                                if let Some(title) = a.title {
+                                    arg = arg.with_title(title);
+                                }
+                                if let Some(desc) = a.description {
+                                    arg = arg.with_description(desc);
+                                }
+                                arg = arg.with_required(a.required);
+                                arg
+                            })
+                            .collect(),
+                    ),
+                );
+                if let Some(title) = p.title {
+                    prompt = prompt.with_title(title);
+                }
+                prompt
+            })
             .collect();
 
         info!(
@@ -105,6 +124,40 @@ impl<E: PhpExecutor + 'static> RoxyServer<E> {
             resources,
             prompts,
         })
+    }
+}
+
+fn extract_session_id(context: &rmcp::service::RequestContext<rmcp::RoleServer>) -> Option<String> {
+    context
+        .extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.headers.get("mcp-session-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+}
+
+fn map_php_content(item: PhpContent) -> Content {
+    match item {
+        PhpContent::Text { text } => Content::text(text),
+        PhpContent::ResourceLink {
+            uri,
+            name,
+            title,
+            description,
+            mime_type,
+        } => {
+            let mut raw = RawResource::new(uri, name);
+            if let Some(t) = title {
+                raw = raw.with_title(t);
+            }
+            if let Some(d) = description {
+                raw.description = Some(d);
+            }
+            if let Some(m) = mime_type {
+                raw.mime_type = Some(m);
+            }
+            Content::resource_link(raw)
+        }
     }
 }
 
@@ -135,41 +188,119 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         info!("call_tool: {}", request.name);
-        let php_request = PhpRequest::CallTool {
-            name: &request.name,
-            arguments: request.arguments.as_ref(),
-            elicitation_results: None,
-            context: None,
-        };
 
-        let response = self
-            .executor
-            .execute(&php_request)
-            .await
-            .map_err(|e| {
+        let session_id = extract_session_id(&context);
+        let session_id_ref = session_id.as_deref();
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let mut elicitation_results: Vec<serde_json::Value> = Vec::new();
+        let mut elicit_context: Option<serde_json::Value> = None;
+
+        loop {
+            let php_request = PhpRequest::CallTool {
+                name: &request.name,
+                arguments: request.arguments.as_ref(),
+                elicitation_results: if elicitation_results.is_empty() {
+                    None
+                } else {
+                    Some(&elicitation_results)
+                },
+                context: elicit_context.as_ref(),
+            };
+            let envelope = PhpEnvelope {
+                session_id: session_id_ref,
+                request_id: &request_id,
+                request: php_request,
+            };
+
+            let response = self.executor.execute(&envelope).await.map_err(|e| {
                 error!("PHP executor error: {e}");
                 McpError::internal_error(format!("PHP error: {e}"), None)
             })?;
 
-        match response {
-            PhpCallResult::Content(c) => {
-                let content: Vec<Content> = c
-                    .content
-                    .into_iter()
-                    .map(|item| match item {
-                        PhpContent::Text { text } => Content::text(text),
-                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in call_tool"),
-                    })
-                    .collect();
-                Ok(CallToolResult::success(content))
+            match response {
+                PhpCallResult::Content(c) => {
+                    let content: Vec<Content> =
+                        c.content.into_iter().map(map_php_content).collect();
+
+                    let mut result = CallToolResult::success(content);
+                    if c.structured_content.is_some() {
+                        result.structured_content = c.structured_content;
+                    }
+
+                    return Ok(result);
+                }
+                PhpCallResult::Error(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
+                }
+                PhpCallResult::Elicit(elicit) => {
+                    let schema: ElicitationSchema =
+                        serde_json::from_value(elicit.schema.clone()).map_err(|e| {
+                            error!("invalid elicitation schema from PHP: {e}");
+                            McpError::internal_error(
+                                format!("invalid elicitation schema: {e}"),
+                                None,
+                            )
+                        })?;
+
+                    let params = CreateElicitationRequestParams::FormElicitationParams {
+                        meta: None,
+                        message: elicit.message,
+                        requested_schema: schema,
+                    };
+
+                    let elicit_result = context
+                        .peer
+                        .create_elicitation(params)
+                        .await
+                        .map_err(|e| {
+                            error!("elicitation request failed: {e}");
+                            McpError::internal_error(format!("elicitation failed: {e}"), None)
+                        })?;
+
+                    match elicit_result.action {
+                        ElicitationAction::Accept => {
+                            if let Some(content) = elicit_result.content {
+                                elicitation_results.push(content);
+                            }
+                            elicit_context = elicit.context;
+                            // continue loop — re-invoke PHP with results
+                        }
+                        action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
+                            let action_str = match action {
+                                ElicitationAction::Decline => "decline",
+                                ElicitationAction::Cancel => "cancel",
+                                _ => unreachable!(),
+                            };
+
+                            // Notify PHP about cancellation
+                            let cancel_request = PhpRequest::ElicitationCancelled {
+                                name: &request.name,
+                                action: action_str,
+                                context: elicit.context.as_ref(),
+                            };
+                            let cancel_envelope = PhpEnvelope {
+                                session_id: session_id_ref,
+                                request_id: &request_id,
+                                request: cancel_request,
+                            };
+                            if let Err(e) = self.executor.execute(&cancel_envelope).await {
+                                warn!("failed to notify PHP about elicitation cancellation: {e}");
+                            }
+
+                            let msg = match action {
+                                ElicitationAction::Decline => "User declined to provide information",
+                                ElicitationAction::Cancel => "User cancelled the operation",
+                                _ => unreachable!(),
+                            };
+                            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+                        }
+                    }
+                }
             }
-            PhpCallResult::Error(e) => {
-                Ok(CallToolResult::error(vec![Content::text(e.error.message)]))
-            }
-            PhpCallResult::Elicit(_) => unimplemented!("elicit in call_tool"),
         }
     }
 
@@ -188,21 +319,25 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         info!("read_resource: {}", request.uri);
+
+        let session_id = extract_session_id(&context);
+        let request_id = uuid::Uuid::new_v4().to_string();
         let php_request = PhpRequest::ReadResource {
             uri: &request.uri,
         };
+        let envelope = PhpEnvelope {
+            session_id: session_id.as_deref(),
+            request_id: &request_id,
+            request: php_request,
+        };
 
-        let response = self
-            .executor
-            .execute(&php_request)
-            .await
-            .map_err(|e| {
-                error!("PHP executor error: {e}");
-                McpError::internal_error(format!("PHP error: {e}"), None)
-            })?;
+        let response = self.executor.execute(&envelope).await.map_err(|e| {
+            error!("PHP executor error: {e}");
+            McpError::internal_error(format!("PHP error: {e}"), None)
+        })?;
 
         match response {
             PhpCallResult::Content(c) => {
@@ -213,15 +348,17 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                         PhpContent::Text { text } => {
                             ResourceContents::text(text, request.uri.clone())
                         }
-                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in read_resource"),
+                        PhpContent::ResourceLink { .. } => {
+                            ResourceContents::text("[resource link]".to_string(), request.uri.clone())
+                        }
                     })
                     .collect();
                 Ok(ReadResourceResult::new(contents))
             }
-            PhpCallResult::Error(e) => {
-                Err(McpError::resource_not_found(e.error.message, None))
+            PhpCallResult::Error(e) => Err(McpError::resource_not_found(e.error.message, None)),
+            PhpCallResult::Elicit(_) => {
+                Err(McpError::internal_error("elicitation not supported in read_resource", None))
             }
-            PhpCallResult::Elicit(_) => unimplemented!("elicit in read_resource"),
         }
     }
 
@@ -240,22 +377,26 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
         info!("get_prompt: {}", request.name);
+
+        let session_id = extract_session_id(&context);
+        let request_id = uuid::Uuid::new_v4().to_string();
         let php_request = PhpRequest::GetPrompt {
             name: &request.name,
             arguments: request.arguments.as_ref(),
         };
+        let envelope = PhpEnvelope {
+            session_id: session_id.as_deref(),
+            request_id: &request_id,
+            request: php_request,
+        };
 
-        let response = self
-            .executor
-            .execute(&php_request)
-            .await
-            .map_err(|e| {
-                error!("PHP executor error: {e}");
-                McpError::internal_error(format!("PHP error: {e}"), None)
-            })?;
+        let response = self.executor.execute(&envelope).await.map_err(|e| {
+            error!("PHP executor error: {e}");
+            McpError::internal_error(format!("PHP error: {e}"), None)
+        })?;
 
         match response {
             PhpCallResult::Content(c) => {
@@ -266,15 +407,36 @@ impl<E: PhpExecutor + 'static> ServerHandler for RoxyServer<E> {
                         PhpContent::Text { text } => {
                             PromptMessage::new_text(PromptMessageRole::Assistant, text)
                         }
-                        PhpContent::ResourceLink { .. } => unimplemented!("resource_link in get_prompt"),
+                        PhpContent::ResourceLink {
+                            uri,
+                            name,
+                            title,
+                            description,
+                            mime_type,
+                        } => {
+                            let mut raw = RawResource::new(uri, name);
+                            if let Some(t) = title {
+                                raw = raw.with_title(t);
+                            }
+                            if let Some(d) = description {
+                                raw.description = Some(d);
+                            }
+                            if let Some(m) = mime_type {
+                                raw.mime_type = Some(m);
+                            }
+                            PromptMessage::new_resource_link(
+                                PromptMessageRole::Assistant,
+                                raw.no_annotation(),
+                            )
+                        }
                     })
                     .collect();
                 Ok(GetPromptResult::new(messages))
             }
-            PhpCallResult::Error(e) => {
-                Err(McpError::invalid_params(e.error.message, None))
+            PhpCallResult::Error(e) => Err(McpError::invalid_params(e.error.message, None)),
+            PhpCallResult::Elicit(_) => {
+                Err(McpError::internal_error("elicitation not supported in get_prompt", None))
             }
-            PhpCallResult::Elicit(_) => unimplemented!("elicit in get_prompt"),
         }
     }
 }

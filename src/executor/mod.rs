@@ -2,12 +2,12 @@ pub mod fastcgi;
 
 use std::sync::Arc;
 
-use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpRequest};
+use crate::protocol::{PhpCallResult, PhpDiscoverResponse, PhpEnvelope};
 
 pub trait PhpExecutor: Send + Sync {
     fn execute(
         &self,
-        request: &PhpRequest<'_>,
+        request: &PhpEnvelope<'_>,
     ) -> impl std::future::Future<Output = anyhow::Result<PhpCallResult>> + Send;
 
     fn discover(
@@ -18,7 +18,7 @@ pub trait PhpExecutor: Send + Sync {
 impl<T: PhpExecutor> PhpExecutor for Arc<T> {
     fn execute(
         &self,
-        request: &PhpRequest<'_>,
+        request: &PhpEnvelope<'_>,
     ) -> impl std::future::Future<Output = anyhow::Result<PhpCallResult>> + Send {
         (**self).execute(request)
     }
