@@ -1,4 +1,5 @@
 pub mod fastcgi;
+pub mod http;
 
 use std::sync::Arc;
 
