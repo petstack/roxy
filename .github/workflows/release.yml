@@ -1,0 +1,247 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package archive
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          staging="roxy-${REF_NAME}-${TARGET}"
+          mkdir -p "$staging"
+          cp "target/${TARGET}/release/roxy" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar -czf "${staging}.tar.gz" "$staging"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          cat "${staging}.tar.gz.sha256"
+
+      - name: Install cargo-deb
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Install cargo-generate-rpm
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-generate-rpm
+
+      - name: Build .deb package
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo deb --no-build --target "$TARGET"
+          # Move the .deb next to the tarballs and compute its SHA256
+          deb_path="$(find target/"$TARGET"/debian -maxdepth 1 -name 'roxy_*.deb' | head -1)"
+          if [ -z "$deb_path" ]; then
+            echo "error: no .deb produced" >&2
+            exit 1
+          fi
+          cp "$deb_path" .
+          deb_file="$(basename "$deb_path")"
+          shasum -a 256 "$deb_file" > "${deb_file}.sha256"
+          cat "${deb_file}.sha256"
+
+      - name: Build .rpm package
+        if: endsWith(matrix.target, '-unknown-linux-musl')
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo generate-rpm --target "$TARGET"
+          rpm_path="$(find target/"$TARGET"/generate-rpm -maxdepth 1 -name 'roxy-*.rpm' | head -1)"
+          if [ -z "$rpm_path" ]; then
+            echo "error: no .rpm produced" >&2
+            exit 1
+          fi
+          cp "$rpm_path" .
+          rpm_file="$(basename "$rpm_path")"
+          shasum -a 256 "$rpm_file" > "${rpm_file}.sha256"
+          cat "${rpm_file}.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: roxy-${{ matrix.target }}
+          path: |
+            roxy-*.tar.gz
+            roxy-*.tar.gz.sha256
+            roxy_*.deb
+            roxy_*.deb.sha256
+            roxy-*.rpm
+            roxy-*.rpm.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/roxy-*.tar.gz
+            artifacts/roxy-*.tar.gz.sha256
+            artifacts/roxy_*.deb
+            artifacts/roxy_*.deb.sha256
+            artifacts/roxy-*.rpm
+            artifacts/roxy-*.rpm.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+
+  homebrew:
+    name: update homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Check for HOMEBREW_TAP_TOKEN
+        id: check
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "HOMEBREW_TAP_TOKEN secret not set — skipping tap update."
+            echo "See packaging/homebrew/README.md for setup instructions."
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source repo (for formula template)
+        if: steps.check.outputs.has_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout homebrew-tap
+        if: steps.check.outputs.has_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula with new version and SHA256s
+        if: steps.check.outputs.has_token == 'true'
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF_NAME#v}"
+
+          # Start from the template shipped in the source repo
+          cp source/packaging/homebrew/roxy.rb tap/Formula/roxy.rb
+
+          # Substitute version
+          sed -i "s|version \".*\"|version \"${VERSION}\"|" tap/Formula/roxy.rb
+
+          # Fetch SHA256 for each target archive from the just-published release
+          # and substitute its placeholder in the formula
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            archive="roxy-${REF_NAME}-${target}.tar.gz"
+            sha_url="https://github.com/${REPO}/releases/download/${REF_NAME}/${archive}.sha256"
+            sha="$(curl -sSfL "$sha_url" | awk '{print $1}')"
+            if [ -z "$sha" ] || [ "${#sha}" -ne 64 ]; then
+              echo "error: failed to fetch valid SHA256 for ${target} (got: '${sha}')" >&2
+              exit 1
+            fi
+            placeholder="REPLACE_WITH_$(echo "${target}" | tr 'a-z-' 'A-Z_')_SHA256"
+            sed -i "s|${placeholder}|${sha}|" tap/Formula/roxy.rb
+            echo "  ${target} -> ${sha}"
+          done
+
+          # Safety check: no placeholders should remain
+          if grep -q "REPLACE_WITH" tap/Formula/roxy.rb; then
+            echo "error: unsubstituted placeholders remain in formula:" >&2
+            grep "REPLACE_WITH" tap/Formula/roxy.rb >&2
+            exit 1
+          fi
+
+          echo ""
+          echo "===== Updated Formula/roxy.rb ====="
+          cat tap/Formula/roxy.rb
+
+      - name: Commit and push to homebrew-tap
+        if: steps.check.outputs.has_token == 'true'
+        working-directory: tap
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/roxy.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "roxy ${REF_NAME}"
+          git push
