@@ -12,10 +12,12 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpService, StreamableHttpServerConfig,
     session::local::LocalSessionManager,
 };
-use tracing::info;
+use tracing::{info, warn};
 
-use config::{Config, FcgiAddress, LogFormat, Transport};
+use config::{Config, LogFormat, Transport, UpstreamKind};
+use executor::UpstreamExecutor;
 use executor::fastcgi::FastCgiExecutor;
+use executor::http::HttpExecutor;
 use server::RoxyServer;
 
 fn init_logging(format: &LogFormat) {
@@ -40,22 +42,57 @@ async fn main() -> anyhow::Result<()> {
     info!("transport: {:?}", config.transport);
     info!("upstream: {}", config.upstream);
 
-    let address = FcgiAddress::parse(&config.upstream);
-    let entrypoint = config.upstream_entrypoint.clone()
-        .expect("--upstream-entrypoint is required for FastCGI upstream");
-    let executor = Arc::new(FastCgiExecutor::new(
-        &address,
-        entrypoint,
-        config.pool_size,
-    )?);
+    let upstream_kind = UpstreamKind::parse(&config.upstream);
 
+    match upstream_kind {
+        UpstreamKind::Http { url } => {
+            if config.upstream_entrypoint.is_some() {
+                warn!("--upstream-entrypoint is ignored for HTTP upstream");
+            }
+
+            info!("using HTTP executor → {url}");
+            let executor = Arc::new(HttpExecutor::new(
+                url,
+                config.upstream_timeout,
+                config.upstream_insecure,
+                &config.upstream_header,
+            )?);
+            run(executor, &config).await
+        }
+        UpstreamKind::FastCgi { address } => {
+            let entrypoint = config.upstream_entrypoint.clone().ok_or_else(|| {
+                anyhow::anyhow!("--upstream-entrypoint is required for FastCGI upstream")
+            })?;
+
+            if config.upstream_insecure {
+                warn!("--upstream-insecure is ignored for FastCGI upstream");
+            }
+            if !config.upstream_header.is_empty() {
+                warn!("--upstream-header is ignored for FastCGI upstream");
+            }
+
+            info!("using FastCGI executor → {}", config.upstream);
+            let executor = Arc::new(FastCgiExecutor::new(
+                &address,
+                entrypoint,
+                config.pool_size,
+            )?);
+            run(executor, &config).await
+        }
+    }
+}
+
+async fn run<E: UpstreamExecutor + 'static>(
+    executor: Arc<E>,
+    config: &Config,
+) -> anyhow::Result<()> {
     match config.transport {
         Transport::Stdio => run_stdio(executor).await,
         Transport::Http => run_http(executor, config.port).await,
     }
 }
 
-async fn run_stdio(executor: Arc<FastCgiExecutor>) -> anyhow::Result<()> {
+async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::Result<()> {
     info!("starting stdio transport");
     let server = RoxyServer::new(executor).await?;
     let service = server
@@ -66,14 +103,16 @@ async fn run_stdio(executor: Arc<FastCgiExecutor>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_http(executor: Arc<FastCgiExecutor>, port: u16) -> anyhow::Result<()> {
+async fn run_http<E: UpstreamExecutor + 'static>(
+    executor: Arc<E>,
+    port: u16,
+) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{port}");
     info!("starting HTTP/SSE transport on {addr}");
 
-    // Pre-discover capabilities so the factory closure can be synchronous.
-    let discover_result =
-        RoxyServer::discover_from(&*executor).await
-            .context("failed to discover PHP capabilities")?;
+    let discover_result = RoxyServer::discover_from(&*executor)
+        .await
+        .context("failed to discover upstream capabilities")?;
 
     let ct = tokio_util::sync::CancellationToken::new();
 
@@ -85,8 +124,7 @@ async fn run_http(executor: Arc<FastCgiExecutor>, port: u16) -> anyhow::Result<(
             ))
         },
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default()
-            .with_cancellation_token(ct.child_token()),
+        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
 
     let router = axum::Router::new().nest_service("/mcp", service);
