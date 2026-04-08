@@ -1,261 +1,570 @@
-# Roxy
+# roxy
 
-High-performance MCP (Model Context Protocol) server written in Rust with PHP backend.
+---
 
-Rust handles everything performance-critical: connections, concurrency, protocol parsing, connection pooling. PHP handles everything business-critical: tool logic, resource data, prompt generation. The two communicate through a simplified internal JSON protocol via FastCGI.
+**English** · [Русский](i18n/README.ru.md) · [Українська](i18n/README.uk.md) · [Беларуская](i18n/README.be.md) · [Polski](i18n/README.pl.md) · [Deutsch](i18n/README.de.md) · [Français](i18n/README.fr.md) · [Español](i18n/README.es.md) · [中文](i18n/README.zh-CN.md) · [日本語](i18n/README.ja.md)
 
-## How It Works
+---
 
-```
-MCP Client (Claude, Cursor, etc.)
-       |
-       | JSON-RPC (stdio or HTTP/SSE)
-       v
-  +-----------+
-  |   rmcp    |  Rust: MCP protocol, transport, sessions
-  +-----------+
-       |
-  +-----------+
-  |  roxy    |  Rust: routes MCP methods, caches capabilities
-  +-----------+
-       |
-       | Internal JSON (simplified, no JSON-RPC)
-       | via FastCGI
-       v
-  +-----------+
-  |  PHP-FPM  |  PHP: business logic
-  +-----------+
-```
+**High-performance MCP (Model Context Protocol) proxy server written in Rust.**
 
-### Request Flow
+roxy bridges MCP clients (Claude Desktop, Cursor, Zed, etc.) to any upstream handler running as a **FastCGI** backend (e.g. PHP-FPM) or an **HTTP(S)** endpoint. Rust handles everything performance-critical — transport, protocol parsing, connection pooling, concurrency — via the official [`rmcp`](https://crates.io/crates/rmcp) crate. Your handler only deals with a small, simplified JSON protocol and returns results.
 
-1. MCP client sends a JSON-RPC request (e.g., `tools/call`) via stdio or HTTP/SSE
-2. `rmcp` crate handles transport and protocol parsing
-3. `RoxyServer` receives the typed MCP call and builds a simplified JSON request
-4. `FastCgiExecutor` sends the request to PHP-FPM through a pooled FastCGI connection
-5. PHP reads the JSON from `php://input`, processes it, and writes a JSON response
-6. Rust parses the response and maps it back to MCP protocol types
-7. `rmcp` serializes and sends back to the client
+This lets you write MCP servers in **any language** — PHP, Python, Node, Go, Ruby — without reimplementing JSON-RPC framing, transport, session management, or capability negotiation every time.
 
-### Internal Protocol
+## Table of contents
 
-PHP never sees JSON-RPC, request IDs, or MCP framing. It receives simple JSON:
+- [Features](#features)
+- [Installation](#installation)
+  - [Homebrew (macOS and Linux)](#homebrew-macos-and-linux)
+  - [Install script (any Unix)](#install-script-any-unix)
+  - [Debian / Ubuntu (.deb)](#debian--ubuntu-deb)
+  - [Fedora / RHEL / openSUSE (.rpm)](#fedora--rhel--opensuse-rpm)
+  - [Alpine / any Linux (static tarball)](#alpine--any-linux-static-tarball)
+  - [From source](#from-source)
+  - [Verify the installation](#verify-the-installation)
+- [Quick start](#quick-start)
+- [CLI reference](#cli-reference)
+- [Writing an upstream handler](#writing-an-upstream-handler)
+- [Upstream protocol reference](#upstream-protocol-reference)
+  - [Request types](#request-types)
+  - [Elicitation (multi-turn tool input)](#elicitation-multi-turn-tool-input)
+  - [Error response](#error-response)
+- [Architecture](#architecture)
+- [Development](#development)
+- [License](#license)
 
-```json
-{"type": "discover"}
-{"type": "call_tool", "name": "add", "arguments": {"a": 2, "b": 3}}
-{"type": "read_resource", "uri": "roxy://status"}
-{"type": "get_prompt", "name": "greet", "arguments": {"name": "World"}}
-```
+## Features
 
-And responds with:
-
-```json
-{"content": [{"type": "text", "text": "5"}]}
-{"error": {"code": 404, "message": "Unknown tool: foo"}}
-```
-
-### Capability Discovery
-
-At startup, roxy sends a `{"type": "discover"}` request to PHP. PHP returns the full list of tools, resources, and prompts it supports. roxy caches this and serves it to all MCP clients without hitting PHP again.
-
-## Requirements
-
-- Rust (edition 2024)
-- PHP-FPM (PHP 8.1+)
+- **Multi-backend**: FastCGI (TCP or Unix socket) and HTTP(S) upstreams, auto-detected from URL format
+- **Transports**: stdio and HTTP/SSE, both supported natively via `rmcp`
+- **MCP 2025-06-18 features**: elicitation (multi-turn tool input), structured tool output, resource links in tool responses
+- **Connection pooling** for FastCGI (via `deadpool`)
+- **TLS via rustls** — no OpenSSL dependency, fully static musl builds
+- **Capability caching** — tools/resources/prompts discovered once at startup
+- **Custom HTTP headers**, configurable timeouts, request/session IDs propagated to upstream
 
 ## Installation
 
+Prebuilt binaries are published on every tagged release for **macOS (arm64, x86_64)** and **Linux (arm64, x86_64, musl-static)**. Pick whichever method suits your platform.
+
+### Homebrew (macOS and Linux)
+
 ```bash
+brew tap petstack/tap
+brew install roxy
+```
+
+Works on macOS (Intel and Apple Silicon) and Linux (x86_64 and arm64) with Homebrew installed.
+
+### Install script (any Unix)
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
+```
+
+The script auto-detects your OS and architecture, downloads the right tarball from GitHub Releases, verifies the SHA256 checksum, and installs to `/usr/local/bin/roxy` (using `sudo` if needed).
+
+Options:
+
+```bash
+# Install a specific version
+curl -sSfL .../install.sh | sh -s -- --version v0.1.0
+
+# Install to a custom directory (no sudo needed)
+curl -sSfL .../install.sh | sh -s -- --bin-dir $HOME/.local/bin
+```
+
+Environment variables `ROXY_REPO`, `ROXY_VERSION`, `ROXY_BIN_DIR` work too.
+
+### Debian / Ubuntu (.deb)
+
+```bash
+# amd64
+curl -sSfLO https://github.com/petstack/roxy/releases/latest/download/roxy_0.1.0-1_amd64.deb
+sudo dpkg -i roxy_0.1.0-1_amd64.deb
+
+# arm64
+curl -sSfLO https://github.com/petstack/roxy/releases/latest/download/roxy_0.1.0-1_arm64.deb
+sudo dpkg -i roxy_0.1.0-1_arm64.deb
+```
+
+### Fedora / RHEL / openSUSE (.rpm)
+
+```bash
+# x86_64
+sudo rpm -i https://github.com/petstack/roxy/releases/latest/download/roxy-0.1.0-1.x86_64.rpm
+
+# aarch64
+sudo rpm -i https://github.com/petstack/roxy/releases/latest/download/roxy-0.1.0-1.aarch64.rpm
+```
+
+### Alpine / any Linux (static tarball)
+
+The Linux binaries are statically linked against musl libc, so they run on **any** Linux distribution without dependencies:
+
+```bash
+# Pick your architecture
+ARCH=x86_64   # or aarch64
+curl -sSfL https://github.com/petstack/roxy/releases/latest/download/roxy-v0.1.0-${ARCH}-unknown-linux-musl.tar.gz | tar -xz
+sudo install -m 755 roxy-v0.1.0-${ARCH}-unknown-linux-musl/roxy /usr/local/bin/
+```
+
+Works on Alpine, Debian, Ubuntu, RHEL, Arch, Amazon Linux, Void, NixOS, and anything else with a Linux kernel.
+
+### From source
+
+Requires [Rust](https://rustup.rs/) (edition 2024, stable toolchain):
+
+```bash
+git clone https://github.com/petstack/roxy
+cd roxy
 cargo build --release
+# Binary is at ./target/release/roxy
 ```
 
-## Usage
-
-### 1. Start PHP-FPM
+Or via `cargo install`:
 
 ```bash
-# TCP (default port 9000)
-php-fpm --nodaemonize -d "listen=127.0.0.1:9000" -d "pm=static" -d "pm.max_children=4"
-
-# Or via Unix socket
-php-fpm --nodaemonize -d "listen=/tmp/php-fpm.sock" -d "pm=static" -d "pm.max_children=4"
+cargo install --git https://github.com/petstack/roxy
 ```
 
-### 2. Run roxy
-
-**stdio transport** (for clients that spawn the server as a child process):
+### Verify the installation
 
 ```bash
-roxy --transport stdio \
-      --php-fpm 127.0.0.1:9000 \
-      --php-entrypoint /path/to/handler.php
+roxy --version
+roxy --help
 ```
 
-**HTTP/SSE transport** (for network clients):
+## Quick start
+
+roxy needs **one argument**: `--upstream`, pointing at your handler. The upstream type is **auto-detected** from the URL format:
+
+| URL format | Backend type |
+|---|---|
+| `http://...` or `https://...` | HTTP(S) |
+| `host:port` | FastCGI TCP |
+| `/path/to/socket` | FastCGI Unix socket |
+
+### Example: HTTP backend
 
 ```bash
-roxy --transport http \
-      --port 8080 \
-      --php-fpm 127.0.0.1:9000 \
-      --php-entrypoint /path/to/handler.php
+# Start your HTTP handler on port 8000 (any language, any framework)
+# Then point roxy at it:
+roxy --upstream http://localhost:8000/mcp
 ```
 
-**Unix socket to PHP-FPM:**
+### Example: PHP-FPM backend
 
 ```bash
-roxy --php-fpm /tmp/php-fpm.sock --php-entrypoint /path/to/handler.php
+# Start PHP-FPM
+php-fpm --nodaemonize \
+    -d "listen=127.0.0.1:9000" \
+    -d "pm=static" \
+    -d "pm.max_children=4"
+
+# Point roxy at it
+roxy --upstream 127.0.0.1:9000 --upstream-entrypoint /absolute/path/to/handler.php
 ```
 
-### CLI Options
+### Connect from an MCP client
+
+For Claude Desktop or any client that spawns MCP servers as subprocesses (stdio transport — the default):
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "roxy",
+      "args": ["--upstream", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
+For network clients that connect over HTTP/SSE:
+
+```bash
+roxy --transport http --port 8080 --upstream http://localhost:8000/mcp
+# Client connects to http://localhost:8080/sse
+```
+
+## CLI reference
+
+```
+roxy [OPTIONS] --upstream <UPSTREAM>
+```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--transport` | `stdio` | Transport mode: `stdio` or `http` |
-| `--port` | `8080` | HTTP listen port (only for `http` transport) |
-| `--php-fpm` | `127.0.0.1:9000` | PHP-FPM address (TCP `host:port` or Unix socket path) |
-| `--php-entrypoint` | required | Absolute path to PHP handler script |
-| `--pool-size` | `16` | FastCGI connection pool size |
-| `--log-format` | `pretty` | Log format: `pretty` or `json` |
+| `--upstream <URL>` | **required** | Backend URL. Auto-detects type (see table above) |
+| `--transport <MODE>` | `stdio` | MCP client transport: `stdio` or `http` |
+| `--port <PORT>` | `8080` | HTTP listen port (only with `--transport http`) |
+| `--upstream-entrypoint <PATH>` | — | `SCRIPT_FILENAME` sent to FastCGI backends (required for PHP-FPM) |
+| `--upstream-insecure` | `false` | Skip TLS certificate verification for HTTPS upstreams |
+| `--upstream-timeout <SECS>` | `30` | HTTP upstream request timeout in seconds |
+| `--upstream-header <HEADER>` | — | Custom HTTP header, `Name: Value`. Repeatable |
+| `--pool-size <N>` | `16` | FastCGI connection pool size |
+| `--log-format <FORMAT>` | `pretty` | Log output: `pretty` or `json` |
 
-Log level is controlled via the `RUST_LOG` environment variable:
+Log **level** is controlled via the `RUST_LOG` environment variable:
 
 ```bash
-RUST_LOG=debug roxy --php-entrypoint handler.php
+RUST_LOG=debug roxy --upstream http://localhost:8000/mcp
+RUST_LOG=roxy=debug,rmcp=info roxy --upstream ...  # per-module filters
 ```
 
-## Writing a PHP Handler
+### Full HTTP backend example
 
-A PHP handler is a single file that receives JSON from `php://input` and writes JSON to stdout. It routes by the `type` field.
+```bash
+roxy --upstream https://api.example.com/mcp \
+     --upstream-header "Authorization: Bearer $TOKEN" \
+     --upstream-header "X-Tenant: acme" \
+     --upstream-timeout 60
+```
 
-Minimal example:
+### Full FastCGI (PHP-FPM) example
+
+```bash
+# TCP
+roxy --upstream 127.0.0.1:9000 --upstream-entrypoint /srv/app/handler.php
+
+# Unix socket
+roxy --upstream /var/run/php-fpm.sock --upstream-entrypoint /srv/app/handler.php
+
+# HTTP transport with FastCGI upstream
+roxy --transport http --port 8080 \
+     --upstream 127.0.0.1:9000 \
+     --upstream-entrypoint /srv/app/handler.php
+```
+
+## Writing an upstream handler
+
+Your handler receives simple JSON requests and returns simple JSON responses. **It never sees JSON-RPC, MCP framing, or session state.** roxy translates everything.
+
+### For HTTP backends
+
+Any HTTP server that reads JSON from the request body and writes JSON to the response will work. Example in Python/Flask:
+
+```python
+from flask import Flask, request, jsonify
+app = Flask(__name__)
+
+@app.post("/mcp")
+def handler():
+    req = request.json
+    match req["type"]:
+        case "discover":
+            return jsonify({
+                "tools": [{"name": "echo", "description": "Echo", "input_schema": {...}}],
+                "resources": [],
+                "prompts": [],
+            })
+        case "call_tool":
+            return jsonify({"content": [{"type": "text", "text": req["arguments"]["message"]}]})
+        case _:
+            return jsonify({"error": {"code": 400, "message": "unknown"}}), 200
+```
+
+### For FastCGI (PHP-FPM) backends
+
+A minimal PHP handler:
 
 ```php
 <?php
-$request = json_decode(file_get_contents('php://input'), true);
+$req = json_decode(file_get_contents('php://input'), true);
 header('Content-Type: application/json');
 
-echo match ($request['type']) {
-    'discover' => json_encode([
-        'tools' => [
-            [
-                'name' => 'hello',
-                'description' => 'Says hello',
-                'input_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'name' => ['type' => 'string', 'description' => 'Your name'],
-                    ],
-                    'required' => ['name'],
-                ],
+echo json_encode(match ($req['type']) {
+    'discover' => [
+        'tools' => [[
+            'name' => 'echo',
+            'description' => 'Echoes back input',
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => ['message' => ['type' => 'string']],
+                'required' => ['message'],
             ],
-        ],
+        ]],
         'resources' => [],
         'prompts' => [],
-    ]),
-
-    'call_tool' => json_encode([
-        'content' => [['type' => 'text', 'text' => "Hello, {$request['arguments']['name']}!"]],
-    ]),
-
-    default => json_encode([
-        'error' => ['code' => 400, 'message' => "Unknown type: {$request['type']}"],
-    ]),
-};
+    ],
+    'call_tool' => [
+        'content' => [['type' => 'text', 'text' => $req['arguments']['message']]],
+    ],
+    default => ['error' => ['code' => 400, 'message' => 'unknown type']],
+});
 ```
 
-See `examples/handler.php` for a complete example with multiple tools, resources, and prompts.
+See [`examples/handler.php`](examples/handler.php) for a full example with multiple tools, structured output, elicitation, and resource links.
 
-### Request Types
+## Upstream protocol reference
 
-**`discover`** -- called at server startup to learn what PHP offers.
-
-Response must include `tools`, `resources`, and `prompts` arrays (can be empty):
+Every request from roxy to your upstream is a JSON object with these common envelope fields:
 
 ```json
+{
+  "type": "...",
+  "session_id": "optional-uuid-or-null",
+  "request_id": "uuid-per-request",
+  ...
+}
+```
+
+### Request types
+
+#### `discover`
+
+Sent once at roxy startup. Your handler must return the full catalog of tools, resources, and prompts it supports. roxy caches the result and serves it to all MCP clients without re-querying.
+
+```json
+// Response
 {
   "tools": [
     {
       "name": "tool_name",
+      "title": "Human Name",
       "description": "What it does",
-      "input_schema": { "type": "object", "properties": {...}, "required": [...] }
+      "input_schema": { "type": "object", "properties": {...}, "required": [...] },
+      "output_schema": { "type": "object", "properties": {...} }
     }
   ],
   "resources": [
     {
       "uri": "myapp://resource-id",
       "name": "display-name",
-      "description": "What this resource is",
+      "title": "Human Name",
+      "description": "...",
       "mime_type": "application/json"
     }
   ],
   "prompts": [
     {
       "name": "prompt_name",
-      "description": "What it generates",
+      "title": "Human Name",
+      "description": "...",
       "arguments": [
-        { "name": "arg_name", "description": "What it is", "required": true }
+        { "name": "arg", "title": "Arg", "description": "...", "required": true }
       ]
     }
   ]
 }
 ```
 
-**`call_tool`** -- execute a tool.
+All `title`, `description`, `mime_type`, `output_schema` fields are optional.
 
-Request: `{"type": "call_tool", "name": "...", "arguments": {...}}`
+#### `call_tool`
 
-**`read_resource`** -- read a resource.
+Execute a tool by name. Request:
 
-Request: `{"type": "read_resource", "uri": "..."}`
+```json
+{
+  "type": "call_tool",
+  "name": "tool_name",
+  "arguments": { "key": "value" },
+  "elicitation_results": [ ... ],   // optional: see Elicitation below
+  "context": { ... }                 // optional: echoed from a previous elicit response
+}
+```
 
-**`get_prompt`** -- generate a prompt.
-
-Request: `{"type": "get_prompt", "name": "...", "arguments": {...}}`
-
-### Response Format
-
-**Success:**
+Success response (regular text output):
 
 ```json
 {
   "content": [
-    {"type": "text", "text": "result goes here"}
+    { "type": "text", "text": "result" }
   ]
 }
 ```
 
-**Error:**
+Success response with **structured content** (for tools that define `output_schema`):
 
 ```json
 {
-  "error": {"code": 400, "message": "Something went wrong"}
+  "content": [{ "type": "text", "text": "5 + 3 = 8" }],
+  "structured_content": { "sum": 8, "operands": { "a": 5, "b": 3 } }
 }
+```
+
+Success response with a **resource link** embedded in the output:
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "Booking confirmed." },
+    {
+      "type": "resource_link",
+      "uri": "myapp://bookings/1234",
+      "name": "booking-1234",
+      "title": "Booking #1234"
+    }
+  ]
+}
+```
+
+#### `read_resource`
+
+Read a resource by URI. Request:
+
+```json
+{ "type": "read_resource", "uri": "myapp://status" }
+```
+
+Response: same `content` format as `call_tool`.
+
+#### `get_prompt`
+
+Generate a prompt. Request:
+
+```json
+{ "type": "get_prompt", "name": "greet", "arguments": { "name": "Alice" } }
+```
+
+Response: same `content` format as `call_tool`.
+
+#### `elicitation_cancelled`
+
+Sent when the MCP client cancels an elicitation (see below). Your handler can log/cleanup; the response is ignored.
+
+```json
+{ "type": "elicitation_cancelled", "name": "tool_name", "action": "decline", "context": {...} }
+```
+
+### Elicitation (multi-turn tool input)
+
+A tool can **request more input from the user** mid-execution. On the first `call_tool`, return an `elicit` response instead of `content`:
+
+```json
+{
+  "elicit": {
+    "message": "Which flight class?",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "class": { "type": "string", "enum": ["economy", "business", "first"] }
+      },
+      "required": ["class"]
+    },
+    "context": { "step": 1, "destination": "Tokyo" }
+  }
+}
+```
+
+roxy forwards the elicitation to the MCP client. When the user fills it in, roxy calls your tool **again** with the collected values in `elicitation_results` and your original `context` echoed back:
+
+```json
+{
+  "type": "call_tool",
+  "name": "book_flight",
+  "arguments": { "destination": "Tokyo" },
+  "elicitation_results": [{ "class": "business" }],
+  "context": { "step": 1, "destination": "Tokyo" }
+}
+```
+
+You can chain multiple elicitation rounds by returning another `elicit` until all data is collected.
+
+### Error response
+
+Any request type can return an error instead of success:
+
+```json
+{ "error": { "code": 404, "message": "Unknown tool: foo" } }
 ```
 
 ## Architecture
 
 ```
-src/
-  main.rs             -- CLI, logging, transport startup
-  config.rs           -- clap config, FcgiAddress (TCP/Unix)
-  protocol.rs         -- internal JSON types (PhpRequest, PhpCallResult, etc.)
-  server.rs           -- RoxyServer: rmcp ServerHandler impl, discover caching
-  executor/
-    mod.rs            -- PhpExecutor trait
-    fastcgi.rs        -- FastCgiExecutor: deadpool + fastcgi-client
-examples/
-  handler.php         -- example PHP handler
+MCP Client (Claude, Cursor, Zed, ...)
+       │
+       │ JSON-RPC over stdio or HTTP/SSE
+       ▼
+┌──────────────┐
+│    rmcp      │  MCP protocol, transport, sessions
+└──────────────┘
+       │
+       ▼
+┌──────────────┐
+│  RoxyServer  │  routes MCP methods, caches capabilities
+└──────────────┘
+       │
+       │ simplified JSON (UpstreamEnvelope + UpstreamRequest)
+       ▼
+┌──────────────────────────┐
+│    UpstreamExecutor      │  trait with 2 implementations
+│  ┌────────┬───────────┐  │
+│  │FastCgi │  Http     │  │
+│  └────────┴───────────┘  │
+└──────────────────────────┘
+       │                │
+       ▼                ▼
+   PHP-FPM /        HTTP(S)
+   any FastCGI      endpoint
 ```
 
-### Key Design Decisions
+### Source layout
 
-- **`rmcp` crate** handles all MCP protocol complexity (JSON-RPC, sessions, capabilities negotiation). roxy only implements the `ServerHandler` trait.
-- **Connection pooling** via `deadpool` keeps FastCGI connections alive to PHP-FPM, avoiding per-request connection overhead.
-- **`PhpExecutor` trait** abstracts the PHP communication layer. Currently implemented with FastCGI (`FastCgiExecutor`), designed to support worker pool and HTTP backends in the future.
-- **Discover caching** -- PHP capabilities are fetched once at startup and cached. MCP clients receive cached data without triggering PHP on each `initialize`.
-- **PHP isolation** -- PHP knows nothing about MCP, JSON-RPC, or transport details. It receives and returns simple JSON. This means any PHP framework or vanilla PHP works as a handler.
+```
+src/
+  main.rs             CLI, logging, transport startup, executor selection
+  config.rs           clap Config, UpstreamKind (auto-detect), FcgiAddress
+  protocol.rs         Internal JSON types (UpstreamEnvelope, UpstreamRequest, ...)
+  server.rs           RoxyServer: rmcp ServerHandler impl + discover caching
+  executor/
+    mod.rs            UpstreamExecutor trait
+    fastcgi.rs        FastCgiExecutor: deadpool + fastcgi-client
+    http.rs           HttpExecutor: reqwest + rustls
+examples/
+  handler.php         Full example PHP handler with all features
+```
+
+### Key design decisions
+
+- **rmcp does the heavy lifting.** The official `rmcp` crate handles all MCP protocol complexity (JSON-RPC, transport negotiation, session management). roxy only implements `ServerHandler`.
+- **Upstream is pluggable.** The `UpstreamExecutor` trait abstracts backend communication. FastCGI and HTTP are the current implementations; adding a new backend (gRPC, stdio, WebSocket) is a matter of implementing one trait.
+- **Capabilities are cached.** roxy calls `discover` once at startup and caches tools/resources/prompts in memory. MCP clients get instant `initialize` responses without hitting the upstream.
+- **Connection pooling for FastCGI.** `deadpool` keeps connections to PHP-FPM warm, avoiding per-request socket setup.
+- **Pure-Rust TLS via rustls.** No OpenSSL, no system libraries. Fully static Linux builds, easy cross-compilation, portable binaries.
+- **Upstream stays dumb.** Your handler never sees JSON-RPC, request IDs (other than as an opaque envelope field), session state, or MCP framing. It's plain JSON in, plain JSON out.
+
+## Development
+
+### Build & test
+
+```bash
+cargo build           # debug
+cargo build --release # optimized
+cargo test            # run tests
+cargo clippy          # lint
+cargo fmt             # format
+```
+
+### Running locally with the example PHP handler
+
+```bash
+# Terminal 1: start PHP-FPM
+php-fpm --nodaemonize -d "listen=127.0.0.1:9000" -d "pm=static" -d "pm.max_children=4"
+
+# Terminal 2: run roxy with the example handler
+cargo run -- \
+    --upstream 127.0.0.1:9000 \
+    --upstream-entrypoint "$(pwd)/examples/handler.php"
+```
+
+Then connect with any MCP client, or send JSON-RPC manually over stdio.
+
+### Release workflow
+
+Tagged releases (`git tag vX.Y.Z && git push origin vX.Y.Z`) trigger `.github/workflows/release.yml`, which:
+
+1. Builds release binaries for all four targets (macOS arm64/x86_64, Linux musl arm64/x86_64)
+2. Packages them as `.tar.gz` with SHA256 checksums
+3. Builds `.deb` and `.rpm` packages for both Linux architectures
+4. Publishes a GitHub Release with all artifacts
+5. Bumps the Homebrew formula in [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (if `HOMEBREW_TAP_TOKEN` secret is set)
+
+See [`packaging/homebrew/README.md`](packaging/homebrew/README.md) for tap setup.
 
 ## License
 
-AGPL-3.0
+[AGPL-3.0-only](LICENSE). If you run a modified version of roxy as a network service, you must make your modifications available to users of that service.
