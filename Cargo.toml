@@ -2,7 +2,13 @@
 name = "roxy"
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0"
+license = "AGPL-3.0-only"
+description = "High-performance MCP (Model Context Protocol) proxy server. Bridges MCP clients to FastCGI or HTTP backends."
+homepage = "https://github.com/petstack/roxy"
+repository = "https://github.com/petstack/roxy"
+readme = "README.md"
+keywords = ["mcp", "proxy", "fastcgi", "http", "server"]
+categories = ["command-line-utilities", "network-programming", "web-programming"]
 
 [dependencies]
 rmcp = { version = "1.3", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation"] }
@@ -20,3 +26,36 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
+
+# -----------------------------------------------------------------------------
+# cargo-deb: Debian/Ubuntu .deb package
+# -----------------------------------------------------------------------------
+[package.metadata.deb]
+maintainer = "Vasili Kamrakou <diolektor@gmail.com>"
+copyright = "2026, Vasili Kamrakou <diolektor@gmail.com>"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+roxy is a high-performance MCP (Model Context Protocol) proxy server written in Rust.
+It bridges MCP clients (Claude Desktop, Cursor, etc.) to any backend handler via FastCGI
+(e.g. PHP-FPM) or HTTP(S). Transport is handled by the rmcp crate; business logic is
+delegated to the upstream over a simple JSON protocol.
+"""
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/roxy", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/roxy/README.md", "644"],
+    ["LICENSE", "usr/share/doc/roxy/LICENSE", "644"],
+]
+
+# -----------------------------------------------------------------------------
+# cargo-generate-rpm: Fedora/RHEL/openSUSE .rpm package
+# -----------------------------------------------------------------------------
+[package.metadata.generate-rpm]
+summary = "High-performance MCP proxy server"
+assets = [
+    { source = "target/release/roxy", dest = "/usr/bin/roxy", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/roxy/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/roxy/LICENSE", mode = "644" },
+]
