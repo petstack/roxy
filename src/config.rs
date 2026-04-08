@@ -42,7 +42,7 @@ pub struct Config {
     #[arg(long)]
     pub upstream_header: Vec<String>,
 
-    /// Connection pool size (FastCGI) or max idle connections (HTTP)
+    /// FastCGI connection pool size
     #[arg(long, default_value = "16")]
     pub pool_size: usize,
 

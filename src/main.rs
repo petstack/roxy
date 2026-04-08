@@ -49,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
             if config.upstream_entrypoint.is_some() {
                 warn!("--upstream-entrypoint is ignored for HTTP upstream");
             }
+            if config.upstream_insecure && url.starts_with("http://") {
+                warn!("--upstream-insecure has no effect with plain HTTP upstream");
+            }
 
             info!("using HTTP executor → {url}");
             let executor = Arc::new(HttpExecutor::new(
