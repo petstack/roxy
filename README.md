@@ -204,7 +204,7 @@ roxy [OPTIONS] --upstream <UPSTREAM>
 | `--upstream-entrypoint <PATH>` | — | `SCRIPT_FILENAME` sent to FastCGI backends (required for PHP-FPM) |
 | `--upstream-insecure` | `false` | Skip TLS certificate verification for HTTPS upstreams |
 | `--upstream-timeout <SECS>` | `30` | HTTP upstream request timeout in seconds |
-| `--upstream-header <HEADER>` | — | Custom HTTP header, `Name: Value`. Repeatable |
+| `--upstream-header <HEADER>` | — | Static HTTP header attached to every HTTP-upstream request, `Name: Value`. Repeatable. HTTP upstreams only — ignored for FastCGI |
 | `--pool-size <N>` | `16` | FastCGI connection pool size |
 | `--log-format <FORMAT>` | `pretty` | Log output: `pretty` or `json` |
 
@@ -238,6 +238,19 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Forwarding client headers
+
+Under `--transport http`, every incoming MCP client header is forwarded to the upstream backend automatically — no configuration needed. Hop-by-hop headers (RFC 7230 §6.1: `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) and headers roxy manages itself (`Host`, `Content-Type`, `Content-Length`) are filtered out. Everything else — `Authorization`, `Cookie`, `X-Forwarded-For`, custom `X-*` headers, `mcp-session-id` — reaches the upstream unchanged. This mirrors the default behavior of nginx `fastcgi_pass` / `proxy_pass` and exists so your upstream backend can authenticate the end client (validate bearer tokens, inspect session cookies) without roxy needing to understand the scheme.
+
+| Upstream | Transport form |
+|---|---|
+| HTTP | Forwarded as real HTTP request headers. Multi-valued headers (e.g. two `X-Forwarded-For` entries) are preserved. |
+| FastCGI | Translated into CGI `HTTP_*` parameters per RFC 3875 §4.1.18 — PHP handlers read them from `$_SERVER['HTTP_AUTHORIZATION']`, `$_SERVER['HTTP_X_FORWARDED_FOR']`, etc. Multi-valued headers are joined with `", "` to match nginx `$http_*` semantics. |
+
+`--upstream-header` continues to work as before for HTTP upstreams — it supplies roxy's **own** static identity to the upstream (service token, fixed `X-Client-Id`, etc.). When a client-forwarded header collides with a static `--upstream-header` for the same name, the forwarded value **wins**: the caller's per-request identity is more specific than roxy's default, matching how a reverse proxy typically behaves. `--upstream-header` is currently a no-op for FastCGI upstreams — use auto-forwarding instead.
+
+Under `--transport stdio` there is no incoming HTTP request, so no headers are forwarded; static `--upstream-header` entries still apply to HTTP upstreams as usual.
 
 ### Environment variables
 
