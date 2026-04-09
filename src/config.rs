@@ -11,22 +11,22 @@ use clap::Parser;
 #[command(name = "roxy", version)]
 pub struct Config {
     /// MCP transport mode for client connections
-    #[arg(long, default_value = "stdio")]
+    #[arg(long, env = "ROXY_TRANSPORT", default_value = "stdio")]
     pub transport: Transport,
 
     /// MCP HTTP listen port (only used with --transport http)
-    #[arg(long, default_value = "8080")]
+    #[arg(long, env = "ROXY_PORT", default_value = "8080")]
     pub port: u16,
 
     /// Backend URL. Auto-detects executor type:
     ///   http(s)://...   → HTTP
     ///   host:port       → FastCGI TCP
     ///   /path/to/socket → FastCGI Unix
-    #[arg(long)]
+    #[arg(long, env = "ROXY_UPSTREAM")]
     pub upstream: String,
 
     /// Script path sent as SCRIPT_FILENAME to FastCGI backend
-    #[arg(long)]
+    #[arg(long, env = "ROXY_UPSTREAM_ENTRYPOINT")]
     pub upstream_entrypoint: Option<String>,
 
     /// Skip TLS certificate verification for HTTPS upstreams
@@ -34,7 +34,7 @@ pub struct Config {
     pub upstream_insecure: bool,
 
     /// Upstream request timeout in seconds
-    #[arg(long, default_value = "30")]
+    #[arg(long, env = "ROXY_UPSTREAM_TIMEOUT", default_value = "30")]
     pub upstream_timeout: u64,
 
     /// Custom HTTP header for upstream requests (repeatable).
@@ -43,11 +43,11 @@ pub struct Config {
     pub upstream_header: Vec<String>,
 
     /// FastCGI connection pool size
-    #[arg(long, default_value = "16")]
+    #[arg(long, env = "ROXY_POOL_SIZE", default_value = "16")]
     pub pool_size: usize,
 
     /// Log output format
-    #[arg(long, default_value = "pretty")]
+    #[arg(long, env = "ROXY_LOG_FORMAT", default_value = "pretty")]
     pub log_format: LogFormat,
 }
 
@@ -220,5 +220,103 @@ mod tests {
             out,
             vec!["A: 1".to_string(), "B: 2".to_string(), "C: 3".to_string()]
         );
+    }
+
+    #[test]
+    fn env_transport_http() {
+        temp_env::with_var("ROXY_TRANSPORT", Some("http"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert!(matches!(cfg.transport, Transport::Http));
+        });
+    }
+
+    #[test]
+    fn env_port_parsed_as_u16() {
+        temp_env::with_var("ROXY_PORT", Some("9999"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.port, 9999);
+        });
+    }
+
+    #[test]
+    fn env_port_invalid_fails() {
+        temp_env::with_var("ROXY_PORT", Some("not-a-number"), || {
+            assert!(Config::try_parse_from(["roxy", "--upstream", "http://x"]).is_err());
+        });
+    }
+
+    #[test]
+    fn cli_overrides_env_port() {
+        temp_env::with_var("ROXY_PORT", Some("9999"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x", "--port", "7777"])
+                .unwrap();
+            assert_eq!(cfg.port, 7777);
+        });
+    }
+
+    #[test]
+    fn env_upstream_required_can_come_from_env() {
+        temp_env::with_var("ROXY_UPSTREAM", Some("http://env-only"), || {
+            let cfg = Config::try_parse_from(["roxy"]).unwrap();
+            assert_eq!(cfg.upstream, "http://env-only");
+        });
+    }
+
+    #[test]
+    fn env_upstream_entrypoint() {
+        temp_env::with_var("ROXY_UPSTREAM_ENTRYPOINT", Some("/srv/handler.php"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.upstream_entrypoint.as_deref(), Some("/srv/handler.php"));
+        });
+    }
+
+    #[test]
+    fn env_upstream_timeout() {
+        temp_env::with_var("ROXY_UPSTREAM_TIMEOUT", Some("45"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.upstream_timeout, 45);
+        });
+    }
+
+    #[test]
+    fn env_pool_size_parsed() {
+        temp_env::with_var("ROXY_POOL_SIZE", Some("64"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.pool_size, 64);
+        });
+    }
+
+    #[test]
+    fn env_log_format_json() {
+        temp_env::with_var("ROXY_LOG_FORMAT", Some("json"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert!(matches!(cfg.log_format, LogFormat::Json));
+        });
+    }
+
+    #[test]
+    fn defaults_when_no_cli_no_env() {
+        let vars: Vec<(&str, Option<&str>)> = vec![
+            ("ROXY_TRANSPORT", None),
+            ("ROXY_PORT", None),
+            ("ROXY_UPSTREAM", None),
+            ("ROXY_UPSTREAM_ENTRYPOINT", None),
+            ("ROXY_UPSTREAM_INSECURE", None),
+            ("ROXY_UPSTREAM_TIMEOUT", None),
+            ("ROXY_UPSTREAM_HEADER", None),
+            ("ROXY_POOL_SIZE", None),
+            ("ROXY_LOG_FORMAT", None),
+        ];
+        temp_env::with_vars(vars, || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert!(matches!(cfg.transport, Transport::Stdio));
+            assert_eq!(cfg.port, 8080);
+            assert!(cfg.upstream_entrypoint.is_none());
+            assert!(!cfg.upstream_insecure);
+            assert_eq!(cfg.upstream_timeout, 30);
+            assert!(cfg.upstream_header.is_empty());
+            assert_eq!(cfg.pool_size, 16);
+            assert!(matches!(cfg.log_format, LogFormat::Pretty));
+        });
     }
 }
