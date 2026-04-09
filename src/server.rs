@@ -2,11 +2,19 @@ use std::sync::Arc;
 
 use rmcp::{ServerHandler, model::*};
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::executor::UpstreamExecutor;
 use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, UpstreamRequest};
 
 type McpError = rmcp::ErrorData;
+
+/// Fill a 36-byte stack buffer with a fresh UUID v4 hyphenated ascii string.
+/// Returns a `&str` borrowed from the caller-supplied buffer so callers can
+/// embed a per-request correlation id in an envelope without allocating.
+fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
+    Uuid::new_v4().hyphenated().encode_lower(buf)
+}
 
 pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
@@ -191,7 +199,8 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let session_id_ref = session_id.as_deref();
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let request_id = fresh_request_id(&mut request_id_buf);
 
         let mut elicitation_results: Vec<serde_json::Value> = Vec::new();
         let mut elicit_context: Option<serde_json::Value> = None;
@@ -209,7 +218,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
             };
             let envelope = UpstreamEnvelope {
                 session_id: session_id_ref,
-                request_id: &request_id,
+                request_id,
                 request: upstream_request,
             };
 
@@ -283,7 +292,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             };
                             let cancel_envelope = UpstreamEnvelope {
                                 session_id: session_id_ref,
-                                request_id: &request_id,
+                                request_id,
                                 request: cancel_request,
                             };
                             if let Err(e) = self.executor.execute(&cancel_envelope).await {
@@ -327,11 +336,12 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         info!("read_resource: {}", request.uri);
 
         let session_id = extract_session_id(&context);
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let request_id = fresh_request_id(&mut request_id_buf);
         let upstream_request = UpstreamRequest::ReadResource { uri: &request.uri };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
-            request_id: &request_id,
+            request_id,
             request: upstream_request,
         };
 
@@ -387,14 +397,15 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         info!("get_prompt: {}", request.name);
 
         let session_id = extract_session_id(&context);
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let request_id = fresh_request_id(&mut request_id_buf);
         let upstream_request = UpstreamRequest::GetPrompt {
             name: &request.name,
             arguments: request.arguments.as_ref(),
         };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
-            request_id: &request_id,
+            request_id,
             request: upstream_request,
         };
 
