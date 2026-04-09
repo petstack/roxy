@@ -4,7 +4,7 @@ use rmcp::{ServerHandler, model::*};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::executor::UpstreamExecutor;
+use crate::executor::{ExecuteContext, UpstreamExecutor};
 use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, UpstreamRequest};
 
 type McpError = rmcp::ErrorData;
@@ -223,10 +223,14 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                 request: upstream_request,
             };
 
-            let response = self.executor.execute(&envelope).await.map_err(|e| {
-                error!("upstream executor error: {e}");
-                McpError::internal_error(format!("upstream error: {e}"), None)
-            })?;
+            let response = self
+                .executor
+                .execute(&envelope, ExecuteContext::default())
+                .await
+                .map_err(|e| {
+                    error!("upstream executor error: {e}");
+                    McpError::internal_error(format!("upstream error: {e}"), None)
+                })?;
 
             match response {
                 UpstreamCallResult::Content(c) => {
@@ -296,7 +300,11 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                                 request_id,
                                 request: cancel_request,
                             };
-                            if let Err(e) = self.executor.execute(&cancel_envelope).await {
+                            if let Err(e) = self
+                                .executor
+                                .execute(&cancel_envelope, ExecuteContext::default())
+                                .await
+                            {
                                 warn!(
                                     "failed to notify upstream about elicitation cancellation: {e}"
                                 );
@@ -346,10 +354,14 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
             request: upstream_request,
         };
 
-        let response = self.executor.execute(&envelope).await.map_err(|e| {
-            error!("upstream executor error: {e}");
-            McpError::internal_error(format!("upstream error: {e}"), None)
-        })?;
+        let response = self
+            .executor
+            .execute(&envelope, ExecuteContext::default())
+            .await
+            .map_err(|e| {
+                error!("upstream executor error: {e}");
+                McpError::internal_error(format!("upstream error: {e}"), None)
+            })?;
 
         match response {
             UpstreamCallResult::Content(c) => {
@@ -410,10 +422,14 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
             request: upstream_request,
         };
 
-        let response = self.executor.execute(&envelope).await.map_err(|e| {
-            error!("upstream executor error: {e}");
-            McpError::internal_error(format!("upstream error: {e}"), None)
-        })?;
+        let response = self
+            .executor
+            .execute(&envelope, ExecuteContext::default())
+            .await
+            .map_err(|e| {
+                error!("upstream executor error: {e}");
+                McpError::internal_error(format!("upstream error: {e}"), None)
+            })?;
 
         match response {
             UpstreamCallResult::Content(c) => {

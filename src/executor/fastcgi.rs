@@ -10,7 +10,7 @@ use crate::protocol::{
     UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest,
 };
 
-use super::UpstreamExecutor;
+use super::{ExecuteContext, UpstreamExecutor};
 
 // --- Pool manager types ---
 
@@ -187,7 +187,11 @@ where
 }
 
 impl UpstreamExecutor for FastCgiExecutor {
-    async fn execute(&self, request: &UpstreamEnvelope<'_>) -> anyhow::Result<UpstreamCallResult> {
+    async fn execute(
+        &self,
+        request: &UpstreamEnvelope<'_>,
+        _ctx: ExecuteContext<'_>,
+    ) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
         let (raw, body_start) = self.send_request(&body).await?;
         let body_bytes = &raw[body_start..];

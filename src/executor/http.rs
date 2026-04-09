@@ -3,9 +3,11 @@ use reqwest::Client;
 use tracing::debug;
 
 use crate::config::parse_header;
-use crate::protocol::{UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest};
+use crate::protocol::{
+    UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest,
+};
 
-use super::UpstreamExecutor;
+use super::{ExecuteContext, UpstreamExecutor};
 
 pub struct HttpExecutor {
     client: Client,
@@ -46,7 +48,11 @@ impl HttpExecutor {
 }
 
 impl UpstreamExecutor for HttpExecutor {
-    async fn execute(&self, request: &UpstreamEnvelope<'_>) -> anyhow::Result<UpstreamCallResult> {
+    async fn execute(
+        &self,
+        request: &UpstreamEnvelope<'_>,
+        _ctx: ExecuteContext<'_>,
+    ) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
         debug!("sending HTTP request to {}", self.url);
 
@@ -99,10 +105,13 @@ impl UpstreamExecutor for HttpExecutor {
             .bytes()
             .await
             .context("failed to read discover response body")?;
-        debug!("HTTP discover response: {}", String::from_utf8_lossy(&bytes));
+        debug!(
+            "HTTP discover response: {}",
+            String::from_utf8_lossy(&bytes)
+        );
 
-        let response: UpstreamDiscoverResponse = serde_json::from_slice(&bytes)
-            .context("failed to parse upstream discover response")?;
+        let response: UpstreamDiscoverResponse =
+            serde_json::from_slice(&bytes).context("failed to parse upstream discover response")?;
         Ok(response)
     }
 }
@@ -113,12 +122,8 @@ mod tests {
 
     #[test]
     fn test_http_executor_new_valid() {
-        let executor = HttpExecutor::new(
-            "http://localhost:8000/handler".to_string(),
-            30,
-            false,
-            &[],
-        );
+        let executor =
+            HttpExecutor::new("http://localhost:8000/handler".to_string(), 30, false, &[]);
         assert!(executor.is_ok());
     }
 
@@ -128,19 +133,18 @@ mod tests {
             "http://localhost:8000/handler".to_string(),
             30,
             false,
-            &["Authorization: Bearer token".to_string(), "X-Custom: value".to_string()],
+            &[
+                "Authorization: Bearer token".to_string(),
+                "X-Custom: value".to_string(),
+            ],
         );
         assert!(executor.is_ok());
     }
 
     #[test]
     fn test_http_executor_new_insecure() {
-        let executor = HttpExecutor::new(
-            "https://localhost:8443/handler".to_string(),
-            10,
-            true,
-            &[],
-        );
+        let executor =
+            HttpExecutor::new("https://localhost:8443/handler".to_string(), 10, true, &[]);
         assert!(executor.is_ok());
     }
 
