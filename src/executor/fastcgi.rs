@@ -125,8 +125,11 @@ impl FastCgiExecutor {
                     .await
                     .map_err(|e| anyhow::anyhow!("pool error: {e}"))?;
                 debug!("sending FastCGI request via TCP");
-                conn.execute(Request::new(params, io::Cursor::new(body)))
-                    .await?
+                let res = conn
+                    .execute(Request::new(params, io::Cursor::new(body)))
+                    .await
+                    .map_err(anyhow::Error::from);
+                detach_on_error(conn, res)?
             }
             FcgiPool::Unix(pool) => {
                 let mut conn = pool
@@ -134,8 +137,11 @@ impl FastCgiExecutor {
                     .await
                     .map_err(|e| anyhow::anyhow!("pool error: {e}"))?;
                 debug!("sending FastCGI request via Unix socket");
-                conn.execute(Request::new(params, io::Cursor::new(body)))
-                    .await?
+                let res = conn
+                    .execute(Request::new(params, io::Cursor::new(body)))
+                    .await
+                    .map_err(anyhow::Error::from);
+                detach_on_error(conn, res)?
             }
         };
 
@@ -160,6 +166,23 @@ fn body_start_offset(raw: &[u8]) -> usize {
         Some(pos) => pos + SEP.len(),
         None => 0,
     }
+}
+
+/// Consume `obj` when `result` is `Err` so that `deadpool` does NOT return
+/// a potentially-broken FastCGI keep-alive connection to the pool. On `Ok`
+/// the object is dropped normally and goes back into the pool.
+///
+/// This is necessary because `recycle()` cannot detect a stale keep-alive
+/// socket without actually issuing a request — the only reliable signal
+/// of brokenness is a failing `execute()` call.
+fn detach_on_error<M, T, E>(obj: managed::Object<M>, result: Result<T, E>) -> Result<T, E>
+where
+    M: managed::Manager,
+{
+    if result.is_err() {
+        let _ = managed::Object::take(obj);
+    }
+    result
 }
 
 impl UpstreamExecutor for FastCgiExecutor {
@@ -222,5 +245,67 @@ mod tests {
         let raw = b"Content-Type: application/json\r\n\r\n";
         let offset = body_start_offset(raw);
         assert_eq!(&raw[offset..], b"");
+    }
+
+    /// Exercises the stale-connection-recovery contract that real FastCGI
+    /// cannot test without a live PHP-FPM: a pool whose recycle() always
+    /// succeeds will happily return a broken keep-alive socket forever
+    /// unless the caller explicitly detaches the object on error. We
+    /// emulate the pool with a counting mock manager and prove that
+    /// `detach_on_error` forces a fresh connection to be created on the
+    /// next get().
+    #[tokio::test]
+    async fn test_detach_on_error_forces_new_connection() {
+        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct MockManager(Arc<AtomicUsize>);
+        impl Manager for MockManager {
+            type Type = usize;
+            type Error = std::io::Error;
+
+            async fn create(&self) -> Result<usize, std::io::Error> {
+                let id = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(id)
+            }
+            async fn recycle(
+                &self,
+                _obj: &mut usize,
+                _metrics: &Metrics,
+            ) -> RecycleResult<std::io::Error> {
+                Ok(())
+            }
+        }
+
+        let created = Arc::new(AtomicUsize::new(0));
+        let pool: Pool<MockManager> = Pool::builder(MockManager(Arc::clone(&created)))
+            .max_size(1)
+            .build()
+            .unwrap();
+
+        // Baseline: dropping the object returns it to the pool.
+        drop(pool.get().await.unwrap());
+        drop(pool.get().await.unwrap());
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            1,
+            "healthy drop should reuse the existing connection"
+        );
+
+        // Simulated failure: the helper consumes the object and therefore
+        // prevents it from being recycled back into the pool.
+        let err: anyhow::Result<()> = Err(anyhow::anyhow!("boom"));
+        let obj = pool.get().await.unwrap();
+        let result = detach_on_error(obj, err);
+        assert!(result.is_err());
+
+        // Next acquisition must build a brand new connection.
+        drop(pool.get().await.unwrap());
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            2,
+            "detach_on_error must prevent a broken connection from being reused"
+        );
     }
 }
