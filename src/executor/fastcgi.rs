@@ -12,6 +12,21 @@ use crate::protocol::{
 
 use super::{ExecuteContext, UpstreamExecutor};
 
+/// Compute a CGI `SCRIPT_NAME` value from a `--upstream-entrypoint` path.
+/// Returns `/` + the basename of the entrypoint, or `/handler.php` when
+/// the entrypoint has no file component (empty string, bare `/`, etc.).
+/// The entrypoint string itself is **not** returned — callers still use
+/// it unchanged as `SCRIPT_FILENAME`.
+#[doc(hidden)]
+pub fn derive_script_name(entrypoint: &str) -> String {
+    let base = std::path::Path::new(entrypoint)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("handler.php");
+    format!("/{base}")
+}
+
 // --- Pool manager types ---
 
 type TcpFcgiClient = Client<Compat<TcpStream>, KeepAlive>;
@@ -71,6 +86,8 @@ enum FcgiPool {
 pub struct FastCgiExecutor {
     pool: FcgiPool,
     script_filename: String,
+    script_name: String,
+    request_uri: String,
 }
 
 impl FastCgiExecutor {
@@ -79,6 +96,9 @@ impl FastCgiExecutor {
         script_filename: String,
         pool_size: usize,
     ) -> anyhow::Result<Self> {
+        let script_name = derive_script_name(&script_filename);
+        let request_uri = script_name.clone();
+
         let pool = match address {
             FcgiAddress::Tcp(addr) => {
                 let mgr = TcpFcgiManager { addr: addr.clone() };
@@ -101,6 +121,8 @@ impl FastCgiExecutor {
         Ok(Self {
             pool,
             script_filename,
+            script_name,
+            request_uri,
         })
     }
 
@@ -111,8 +133,8 @@ impl FastCgiExecutor {
         let params = Params::default()
             .request_method("POST")
             .script_filename(&self.script_filename)
-            .script_name("/handler.php")
-            .request_uri("/handler.php")
+            .script_name(&self.script_name)
+            .request_uri(&self.request_uri)
             .content_type("application/json")
             .content_length(body.len())
             .server_name("localhost")
@@ -250,6 +272,36 @@ mod tests {
         let raw = b"Content-Type: application/json\r\n\r\n";
         let offset = body_start_offset(raw);
         assert_eq!(&raw[offset..], b"");
+    }
+
+    #[test]
+    fn derive_script_name_from_absolute_path() {
+        assert_eq!(
+            derive_script_name("/var/www/app/handler.php"),
+            "/handler.php"
+        );
+    }
+
+    #[test]
+    fn derive_script_name_from_relative_path() {
+        assert_eq!(derive_script_name("examples/handler.php"), "/handler.php");
+    }
+
+    #[test]
+    fn derive_script_name_from_bare_basename() {
+        assert_eq!(derive_script_name("handler.php"), "/handler.php");
+    }
+
+    #[test]
+    fn derive_script_name_uses_real_basename_not_hardcoded() {
+        assert_eq!(derive_script_name("/var/www/bookings/api.php"), "/api.php");
+    }
+
+    #[test]
+    fn derive_script_name_falls_back_for_degenerate_input() {
+        // Trailing slash -> no file name -> fallback.
+        assert_eq!(derive_script_name("/"), "/handler.php");
+        assert_eq!(derive_script_name(""), "/handler.php");
     }
 
     /// Exercises the stale-connection-recovery contract that real FastCGI
