@@ -46,6 +46,14 @@ harness = false
 name = "envelope"
 harness = false
 
+# Release build with line tables — for samply / cargo-flamegraph.
+# Slightly bigger binary, identical codegen. Use via
+# `cargo build --profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
 # -----------------------------------------------------------------------------
 # cargo-deb: Debian/Ubuntu .deb package
 # -----------------------------------------------------------------------------
