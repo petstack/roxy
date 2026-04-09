@@ -3,6 +3,10 @@ pub mod http;
 
 use std::sync::Arc;
 
+// Leading `::` disambiguates the external `http` crate from the
+// sibling `http` submodule declared above.
+use ::http::HeaderMap;
+
 use crate::protocol::{UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope};
 
 /// Per-request, transport-level context threaded into every `execute()`
@@ -14,7 +18,7 @@ pub struct ExecuteContext<'a> {
     /// HTTP headers from the incoming MCP client request that should be
     /// forwarded to the upstream. `None` when roxy is running under
     /// `--transport stdio` (no incoming HTTP request exists).
-    pub forward_headers: Option<&'a ::http::HeaderMap>,
+    pub forward_headers: Option<&'a HeaderMap>,
 }
 
 pub trait UpstreamExecutor: Send + Sync {
