@@ -29,8 +29,15 @@ pub struct Config {
     #[arg(long, env = "ROXY_UPSTREAM_ENTRYPOINT")]
     pub upstream_entrypoint: Option<String>,
 
-    /// Skip TLS certificate verification for HTTPS upstreams
-    #[arg(long, default_value = "false")]
+    /// Skip TLS certificate verification for HTTPS upstreams.
+    ///
+    /// When set via env (`ROXY_UPSTREAM_INSECURE`) it accepts only the
+    /// exact lowercase strings `true` or `false`. Numeric forms such as
+    /// `1` / `0`, and other casings such as `TRUE` / `True`, are not
+    /// accepted by clap's `SetTrue + env` parser and will fail at
+    /// startup. The CLI `--upstream-insecure` flag continues to work
+    /// without a value (presence means `true`).
+    #[arg(long, env = "ROXY_UPSTREAM_INSECURE")]
     pub upstream_insecure: bool,
 
     /// Upstream request timeout in seconds
@@ -317,6 +324,53 @@ mod tests {
             assert!(cfg.upstream_header.is_empty());
             assert_eq!(cfg.pool_size, 16);
             assert!(matches!(cfg.log_format, LogFormat::Pretty));
+        });
+    }
+
+    #[test]
+    fn env_upstream_insecure_true() {
+        temp_env::with_var("ROXY_UPSTREAM_INSECURE", Some("true"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert!(cfg.upstream_insecure);
+        });
+    }
+
+    #[test]
+    fn env_upstream_insecure_false() {
+        temp_env::with_var("ROXY_UPSTREAM_INSECURE", Some("false"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert!(!cfg.upstream_insecure);
+        });
+    }
+
+    #[test]
+    fn env_upstream_insecure_rejects_numeric() {
+        // clap's SetTrue + env only accepts the strings "true" and "false".
+        // Numeric forms like "1" and "0" are deliberately not supported; see
+        // the field doc-comment for the exact accepted value set.
+        temp_env::with_var("ROXY_UPSTREAM_INSECURE", Some("1"), || {
+            assert!(Config::try_parse_from(["roxy", "--upstream", "http://x"]).is_err());
+        });
+    }
+
+    #[test]
+    fn env_upstream_insecure_rejects_zero() {
+        // Sibling of rejects_numeric: both "1" and "0" are numeric
+        // forms that clap's SetTrue + env parser rejects.
+        temp_env::with_var("ROXY_UPSTREAM_INSECURE", Some("0"), || {
+            assert!(Config::try_parse_from(["roxy", "--upstream", "http://x"]).is_err());
+        });
+    }
+
+    #[test]
+    fn cli_overrides_env_upstream_insecure() {
+        // ROXY_UPSTREAM_INSECURE=false, but CLI passes --upstream-insecure
+        // as a flag. CLI should win.
+        temp_env::with_var("ROXY_UPSTREAM_INSECURE", Some("false"), || {
+            let cfg =
+                Config::try_parse_from(["roxy", "--upstream", "http://x", "--upstream-insecure"])
+                    .unwrap();
+            assert!(cfg.upstream_insecure);
         });
     }
 }
