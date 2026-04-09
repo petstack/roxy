@@ -304,6 +304,25 @@ mod tests {
         assert_eq!(derive_script_name(""), "/handler.php");
     }
 
+    /// Regression guard for the `SCRIPT_FILENAME` byte-for-byte invariant
+    /// and for the `new()` field-plumbing: constructing an executor with a
+    /// non-`handler.php` entrypoint must store `script_filename` unchanged
+    /// and derive `script_name` / `request_uri` from its basename. Uses a
+    /// non-listening TCP address — `deadpool` pool construction is lazy
+    /// (no I/O) so this succeeds without PHP-FPM.
+    #[test]
+    fn executor_new_derives_cgi_fields_from_entrypoint() {
+        let addr = FcgiAddress::Tcp("127.0.0.1:0".to_string());
+        let entrypoint = "/var/www/bookings/api.php".to_string();
+        let ex = FastCgiExecutor::new(&addr, entrypoint.clone(), 1).unwrap();
+        assert_eq!(
+            ex.script_filename, entrypoint,
+            "SCRIPT_FILENAME must be byte-for-byte"
+        );
+        assert_eq!(ex.script_name, "/api.php");
+        assert_eq!(ex.request_uri, "/api.php");
+    }
+
     /// Exercises the stale-connection-recovery contract that real FastCGI
     /// cannot test without a live PHP-FPM: a pool whose recycle() always
     /// succeeds will happily return a broken keep-alive socket forever
