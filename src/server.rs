@@ -625,4 +625,29 @@ mod tests {
         let filtered = filter_forward_headers(&incoming);
         assert!(filtered.is_empty());
     }
+
+    #[test]
+    fn filter_forward_headers_preserves_multi_value_headers() {
+        // Guards the `append`-not-`insert` decision in filter_forward_headers.
+        // A future refactor to `insert` (which replaces) would silently drop
+        // the first value and this test would catch it.
+        let mut incoming = HeaderMap::new();
+        incoming.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        incoming.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.2"),
+        );
+
+        let filtered = filter_forward_headers(&incoming);
+
+        let values: Vec<&str> = filtered
+            .get_all("x-forwarded-for")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
 }
