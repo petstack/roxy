@@ -27,6 +27,60 @@ pub fn derive_script_name(entrypoint: &str) -> String {
     format!("/{base}")
 }
 
+/// Convert an HTTP header name to its CGI `HTTP_*` parameter name per
+/// RFC 3875 §4.1.18: upper-case and replace `-` with `_`, then prefix
+/// with `HTTP_`.
+#[doc(hidden)]
+pub fn cgi_header_param(name: &str) -> String {
+    let mut out = String::with_capacity(5 + name.len());
+    out.push_str("HTTP_");
+    for c in name.chars() {
+        out.push(if c == '-' {
+            '_'
+        } else {
+            c.to_ascii_uppercase()
+        });
+    }
+    out
+}
+
+/// Construct the full `Params` map for a FastCGI request. Pure function
+/// (no I/O, no pool access) so the CGI-param shape can be unit-tested
+/// without a live PHP-FPM.
+///
+/// Forward headers — when present — are added as `HTTP_*` CGI variables
+/// per RFC 3875 §4.1.18. Non-UTF-8 header values are silently dropped,
+/// since CGI params must be ASCII and MCP clients in practice only send
+/// text headers.
+fn build_fcgi_params<'a>(
+    script_filename: &'a str,
+    script_name: &'a str,
+    request_uri: &'a str,
+    content_length: usize,
+    forward_headers: Option<&http::HeaderMap>,
+) -> Params<'a> {
+    let mut params = Params::default()
+        .request_method("POST")
+        .script_filename(script_filename)
+        .script_name(script_name)
+        .request_uri(request_uri)
+        .content_type("application/json")
+        .content_length(content_length)
+        .server_name("localhost")
+        .server_port(0);
+
+    if let Some(headers) = forward_headers {
+        for (name, value) in headers {
+            let Ok(value_str) = value.to_str() else {
+                continue;
+            };
+            params = params.custom(cgi_header_param(name.as_str()), value_str.to_owned());
+        }
+    }
+
+    params
+}
+
 // --- Pool manager types ---
 
 type TcpFcgiClient = Client<Compat<TcpStream>, KeepAlive>;
@@ -129,16 +183,18 @@ impl FastCgiExecutor {
     /// Send a FastCGI request and return `(stdout, body_offset)` where the
     /// JSON body starts at `stdout[body_offset..]`. Avoids copying the body
     /// out of the full CGI payload.
-    async fn send_request(&self, body: &[u8]) -> anyhow::Result<(Vec<u8>, usize)> {
-        let params = Params::default()
-            .request_method("POST")
-            .script_filename(&self.script_filename)
-            .script_name(&self.script_name)
-            .request_uri(&self.request_uri)
-            .content_type("application/json")
-            .content_length(body.len())
-            .server_name("localhost")
-            .server_port(0);
+    async fn send_request(
+        &self,
+        body: &[u8],
+        ctx: ExecuteContext<'_>,
+    ) -> anyhow::Result<(Vec<u8>, usize)> {
+        let params = build_fcgi_params(
+            &self.script_filename,
+            &self.script_name,
+            &self.request_uri,
+            body.len(),
+            ctx.forward_headers,
+        );
 
         let response = match &self.pool {
             FcgiPool::Tcp(pool) => {
@@ -212,10 +268,10 @@ impl UpstreamExecutor for FastCgiExecutor {
     async fn execute(
         &self,
         request: &UpstreamEnvelope<'_>,
-        _ctx: ExecuteContext<'_>,
+        ctx: ExecuteContext<'_>,
     ) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
-        let (raw, body_start) = self.send_request(&body).await?;
+        let (raw, body_start) = self.send_request(&body, ctx).await?;
         let body_bytes = &raw[body_start..];
         debug!("FastCGI response: {}", String::from_utf8_lossy(body_bytes));
         UpstreamCallResult::parse(body_bytes).context("failed to parse FastCGI response")
@@ -229,7 +285,8 @@ impl UpstreamExecutor for FastCgiExecutor {
             request: UpstreamRequest::Discover,
         };
         let body = serde_json::to_vec(&envelope)?;
-        let (raw, body_start) = self.send_request(&body).await?;
+        // Discovery runs once at startup — no client, no forward headers.
+        let (raw, body_start) = self.send_request(&body, ExecuteContext::default()).await?;
         let body_bytes = &raw[body_start..];
         debug!(
             "FastCGI discover response: {}",
@@ -321,6 +378,111 @@ mod tests {
         );
         assert_eq!(ex.script_name, "/api.php");
         assert_eq!(ex.request_uri, "/api.php");
+    }
+
+    #[test]
+    fn cgi_header_param_standard_names() {
+        assert_eq!(cgi_header_param("Authorization"), "HTTP_AUTHORIZATION");
+        assert_eq!(cgi_header_param("X-My-Thing"), "HTTP_X_MY_THING");
+        assert_eq!(cgi_header_param("Accept-Language"), "HTTP_ACCEPT_LANGUAGE");
+    }
+
+    #[test]
+    fn cgi_header_param_lowercase_input() {
+        // http::HeaderName normalizes to lowercase on the wire, so this is
+        // the realistic shape of the input we receive.
+        assert_eq!(cgi_header_param("authorization"), "HTTP_AUTHORIZATION");
+        assert_eq!(cgi_header_param("x-my-thing"), "HTTP_X_MY_THING");
+        assert_eq!(cgi_header_param("mcp-session-id"), "HTTP_MCP_SESSION_ID");
+    }
+
+    #[test]
+    fn cgi_header_param_empty_input() {
+        assert_eq!(cgi_header_param(""), "HTTP_");
+    }
+
+    #[test]
+    fn build_fcgi_params_includes_script_fields_and_defaults() {
+        let script_filename = "/var/www/app/handler.php";
+        let script_name = "/handler.php";
+        let request_uri = "/handler.php";
+        let params = build_fcgi_params(script_filename, script_name, request_uri, 42, None);
+
+        assert_eq!(
+            params.get("SCRIPT_FILENAME").unwrap().as_ref(),
+            script_filename
+        );
+        assert_eq!(params.get("SCRIPT_NAME").unwrap().as_ref(), script_name);
+        assert_eq!(params.get("REQUEST_URI").unwrap().as_ref(), request_uri);
+        assert_eq!(params.get("REQUEST_METHOD").unwrap().as_ref(), "POST");
+        assert_eq!(
+            params.get("CONTENT_TYPE").unwrap().as_ref(),
+            "application/json"
+        );
+        assert_eq!(params.get("CONTENT_LENGTH").unwrap().as_ref(), "42");
+    }
+
+    #[test]
+    fn build_fcgi_params_applies_forward_headers_as_http_star() {
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut forward = HeaderMap::new();
+        forward.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer xyz"),
+        );
+        forward.insert(
+            HeaderName::from_static("x-my-custom"),
+            HeaderValue::from_static("value"),
+        );
+        forward.insert(
+            HeaderName::from_static("mcp-session-id"),
+            HeaderValue::from_static("sess-1"),
+        );
+
+        let params = build_fcgi_params(
+            "/var/www/handler.php",
+            "/handler.php",
+            "/handler.php",
+            0,
+            Some(&forward),
+        );
+
+        assert_eq!(
+            params.get("HTTP_AUTHORIZATION").unwrap().as_ref(),
+            "Bearer xyz"
+        );
+        assert_eq!(params.get("HTTP_X_MY_CUSTOM").unwrap().as_ref(), "value");
+        assert_eq!(
+            params.get("HTTP_MCP_SESSION_ID").unwrap().as_ref(),
+            "sess-1"
+        );
+    }
+
+    #[test]
+    fn build_fcgi_params_skips_non_utf8_header_values() {
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut forward = HeaderMap::new();
+        forward.insert(
+            HeaderName::from_static("x-binary"),
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        forward.insert(
+            HeaderName::from_static("x-text"),
+            HeaderValue::from_static("ok"),
+        );
+
+        let params = build_fcgi_params(
+            "/var/www/handler.php",
+            "/handler.php",
+            "/handler.php",
+            0,
+            Some(&forward),
+        );
+
+        assert!(params.get("HTTP_X_BINARY").is_none());
+        assert_eq!(params.get("HTTP_X_TEXT").unwrap().as_ref(), "ok");
     }
 
     /// Exercises the stale-connection-recovery contract that real FastCGI
