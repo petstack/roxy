@@ -6,7 +6,9 @@ use tokio_util::compat::Compat;
 use tracing::{debug, warn};
 
 use crate::config::FcgiAddress;
-use crate::protocol::{UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest};
+use crate::protocol::{
+    UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest,
+};
 
 use super::UpstreamExecutor;
 
@@ -102,7 +104,10 @@ impl FastCgiExecutor {
         })
     }
 
-    async fn send_request(&self, body: &[u8]) -> anyhow::Result<Vec<u8>> {
+    /// Send a FastCGI request and return `(stdout, body_offset)` where the
+    /// JSON body starts at `stdout[body_offset..]`. Avoids copying the body
+    /// out of the full CGI payload.
+    async fn send_request(&self, body: &[u8]) -> anyhow::Result<(Vec<u8>, usize)> {
         let params = Params::default()
             .request_method("POST")
             .script_filename(&self.script_filename)
@@ -141,26 +146,29 @@ impl FastCgiExecutor {
         }
 
         let stdout = response.stdout.unwrap_or_default();
-        extract_body(&stdout)
+        let offset = body_start_offset(&stdout);
+        Ok((stdout, offset))
     }
 }
 
-/// Extract body from raw CGI output (skip HTTP headers before `\r\n\r\n`).
-fn extract_body(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let separator = b"\r\n\r\n";
-    if let Some(pos) = raw.windows(separator.len()).position(|w| w == separator) {
-        Ok(raw[pos + separator.len()..].to_vec())
-    } else {
-        Ok(raw.to_vec())
+/// Return the offset at which the JSON body starts inside raw CGI output.
+/// CGI prefixes the response with HTTP-style headers terminated by `\r\n\r\n`;
+/// if that separator is absent the whole payload is treated as body.
+fn body_start_offset(raw: &[u8]) -> usize {
+    const SEP: &[u8] = b"\r\n\r\n";
+    match raw.windows(SEP.len()).position(|w| w == SEP) {
+        Some(pos) => pos + SEP.len(),
+        None => 0,
     }
 }
 
 impl UpstreamExecutor for FastCgiExecutor {
     async fn execute(&self, request: &UpstreamEnvelope<'_>) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
-        let response_bytes = self.send_request(&body).await?;
-        debug!("FastCGI response: {}", String::from_utf8_lossy(&response_bytes));
-        UpstreamCallResult::parse(&response_bytes).context("failed to parse FastCGI response")
+        let (raw, body_start) = self.send_request(&body).await?;
+        let body_bytes = &raw[body_start..];
+        debug!("FastCGI response: {}", String::from_utf8_lossy(body_bytes));
+        UpstreamCallResult::parse(body_bytes).context("failed to parse FastCGI response")
     }
 
     async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
@@ -171,12 +179,13 @@ impl UpstreamExecutor for FastCgiExecutor {
             request: UpstreamRequest::Discover,
         };
         let body = serde_json::to_vec(&envelope)?;
-        let response_bytes = self.send_request(&body).await?;
+        let (raw, body_start) = self.send_request(&body).await?;
+        let body_bytes = &raw[body_start..];
         debug!(
             "FastCGI discover response: {}",
-            String::from_utf8_lossy(&response_bytes)
+            String::from_utf8_lossy(body_bytes)
         );
-        let response: UpstreamDiscoverResponse = serde_json::from_slice(&response_bytes)
+        let response: UpstreamDiscoverResponse = serde_json::from_slice(body_bytes)
             .context("failed to parse FastCGI discover response")?;
         Ok(response)
     }
@@ -187,23 +196,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_body_with_headers() {
+    fn test_body_start_offset_with_headers() {
         let raw = b"Content-Type: application/json\r\n\r\n{\"ok\":true}";
-        let body = extract_body(raw).unwrap();
-        assert_eq!(body, b"{\"ok\":true}");
+        let offset = body_start_offset(raw);
+        assert_eq!(&raw[offset..], b"{\"ok\":true}");
     }
 
     #[test]
-    fn test_extract_body_no_headers() {
+    fn test_body_start_offset_no_headers() {
         let raw = b"{\"ok\":true}";
-        let body = extract_body(raw).unwrap();
-        assert_eq!(body, b"{\"ok\":true}");
+        let offset = body_start_offset(raw);
+        assert_eq!(offset, 0);
+        assert_eq!(&raw[offset..], b"{\"ok\":true}");
     }
 
     #[test]
-    fn test_extract_body_multiple_headers() {
+    fn test_body_start_offset_multiple_headers() {
         let raw = b"Status: 200 OK\r\nContent-Type: application/json\r\n\r\n{\"data\":1}";
-        let body = extract_body(raw).unwrap();
-        assert_eq!(body, b"{\"data\":1}");
+        let offset = body_start_offset(raw);
+        assert_eq!(&raw[offset..], b"{\"data\":1}");
+    }
+
+    #[test]
+    fn test_body_start_offset_empty_body() {
+        let raw = b"Content-Type: application/json\r\n\r\n";
+        let offset = body_start_offset(raw);
+        assert_eq!(&raw[offset..], b"");
     }
 }
