@@ -1,8 +1,3 @@
-mod config;
-mod executor;
-mod protocol;
-mod server;
-
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -13,11 +8,11 @@ use rmcp::transport::streamable_http_server::{
 };
 use tracing::{info, warn};
 
-use config::{Config, LogFormat, Transport, UpstreamKind};
-use executor::UpstreamExecutor;
-use executor::fastcgi::FastCgiExecutor;
-use executor::http::HttpExecutor;
-use server::RoxyServer;
+use roxy::config::{Config, LogFormat, Transport, UpstreamKind};
+use roxy::executor::UpstreamExecutor;
+use roxy::executor::fastcgi::FastCgiExecutor;
+use roxy::executor::http::HttpExecutor;
+use roxy::server::RoxyServer;
 
 fn init_logging(format: &LogFormat) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(

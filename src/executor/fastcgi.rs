@@ -160,7 +160,8 @@ impl FastCgiExecutor {
 /// Return the offset at which the JSON body starts inside raw CGI output.
 /// CGI prefixes the response with HTTP-style headers terminated by `\r\n\r\n`;
 /// if that separator is absent the whole payload is treated as body.
-fn body_start_offset(raw: &[u8]) -> usize {
+#[doc(hidden)]
+pub fn body_start_offset(raw: &[u8]) -> usize {
     const SEP: &[u8] = b"\r\n\r\n";
     match raw.windows(SEP.len()).position(|w| w == SEP) {
         Some(pos) => pos + SEP.len(),

@@ -12,7 +12,8 @@ type McpError = rmcp::ErrorData;
 /// Fill a 36-byte stack buffer with a fresh UUID v4 hyphenated ascii string.
 /// Returns a `&str` borrowed from the caller-supplied buffer so callers can
 /// embed a per-request correlation id in an envelope without allocating.
-fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
+#[doc(hidden)]
+pub fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
     Uuid::new_v4().hyphenated().encode_lower(buf)
 }
 
