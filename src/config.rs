@@ -45,8 +45,20 @@ pub struct Config {
     pub upstream_timeout: u64,
 
     /// Custom HTTP header for upstream requests (repeatable).
-    /// Format: "Name: Value", e.g. "Authorization: Bearer token"
-    #[arg(long)]
+    ///
+    /// Format: "Name: Value", e.g. "Authorization: Bearer token".
+    ///
+    /// When set via env (`ROXY_UPSTREAM_HEADER`) multiple headers are
+    /// separated by `\n`, which maps naturally onto a Kubernetes YAML
+    /// `|-` block scalar. Leading/trailing blank lines are discarded
+    /// during startup. Passing the CLI flag at all causes the env
+    /// value to be ignored entirely — there is no merging.
+    #[arg(
+        long,
+        env = "ROXY_UPSTREAM_HEADER",
+        value_delimiter = '\n',
+        num_args = 0..,
+    )]
     pub upstream_header: Vec<String>,
 
     /// FastCGI connection pool size
@@ -371,6 +383,80 @@ mod tests {
                 Config::try_parse_from(["roxy", "--upstream", "http://x", "--upstream-insecure"])
                     .unwrap();
             assert!(cfg.upstream_insecure);
+        });
+    }
+
+    #[test]
+    fn env_upstream_header_single() {
+        temp_env::with_var(
+            "ROXY_UPSTREAM_HEADER",
+            Some("Authorization: Bearer t"),
+            || {
+                let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+                assert_eq!(
+                    cfg.upstream_header,
+                    vec!["Authorization: Bearer t".to_string()]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn env_upstream_header_newline_split() {
+        temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("A: 1\nB: 2"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(
+                cfg.upstream_header,
+                vec!["A: 1".to_string(), "B: 2".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn env_upstream_header_trailing_newline_trimmed() {
+        temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("A: 1\n"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            let normalized = normalize_header_list(cfg.upstream_header);
+            assert_eq!(normalized, vec!["A: 1".to_string()]);
+        });
+    }
+
+    #[test]
+    fn env_upstream_header_yaml_block_scalar() {
+        temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("\nA: 1\nB: 2\n"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            let normalized = normalize_header_list(cfg.upstream_header);
+            assert_eq!(normalized, vec!["A: 1".to_string(), "B: 2".to_string()]);
+        });
+    }
+
+    #[test]
+    fn cli_header_overrides_env_header() {
+        temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("Env: fromenv"), || {
+            let cfg = Config::try_parse_from([
+                "roxy",
+                "--upstream",
+                "http://x",
+                "--upstream-header",
+                "Cli: fromcli",
+            ])
+            .unwrap();
+            assert_eq!(cfg.upstream_header, vec!["Cli: fromcli".to_string()]);
+        });
+    }
+
+    #[test]
+    fn env_upstream_header_empty_string_normalized() {
+        // Pin the pipeline contract: when the env var is set to "" (which
+        // happens in Kubernetes when a ConfigMap key exists but has no
+        // content), clap produces a one-element vec containing the empty
+        // string. Task 6's normalize_header_list call in main.rs must
+        // collapse that to an empty vec before any downstream consumer
+        // tries to parse it as a "Name: Value" header.
+        temp_env::with_var("ROXY_UPSTREAM_HEADER", Some(""), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.upstream_header, vec!["".to_string()]);
+            assert!(normalize_header_list(cfg.upstream_header).is_empty());
         });
     }
 }
