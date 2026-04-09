@@ -133,6 +133,49 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
     }
 }
 
+/// Returns `true` for header names that must not be forwarded to the
+/// upstream backend: hop-by-hop headers (RFC 7230 §6.1) and headers that
+/// roxy itself manages on the outgoing request (Host, Content-Type,
+/// Content-Length).
+fn is_dropped_header(name: &str) -> bool {
+    // `eq_ignore_ascii_case` avoids allocating a lowercase copy on the
+    // hot path of every incoming header.
+    const DROPPED: &[&str] = &[
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-type",
+        "content-length",
+    ];
+    DROPPED
+        .iter()
+        .any(|dropped| name.eq_ignore_ascii_case(dropped))
+}
+
+/// Build the forward-header set by copying every entry from `incoming`
+/// that is not filtered by [`is_dropped_header`]. Header names are
+/// preserved exactly as received so the upstream sees the canonical
+/// casing it expects.
+fn filter_forward_headers(incoming: &http::HeaderMap) -> http::HeaderMap {
+    let mut out = http::HeaderMap::with_capacity(incoming.len());
+    for (name, value) in incoming {
+        if !is_dropped_header(name.as_str()) {
+            // `append` (not `insert`) is intentional — a client may
+            // legitimately send the same header name twice (e.g. a
+            // multi-valued `X-Forwarded-For`) and we want to preserve
+            // every entry.
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
 fn extract_session_id(context: &rmcp::service::RequestContext<rmcp::RoleServer>) -> Option<String> {
     context
         .extensions
@@ -140,6 +183,17 @@ fn extract_session_id(context: &rmcp::service::RequestContext<rmcp::RoleServer>)
         .and_then(|parts| parts.headers.get("mcp-session-id"))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned())
+}
+
+/// Pull incoming HTTP headers from the rmcp request context (populated
+/// by the streamable-HTTP transport) and return the forward-header set.
+/// Returns `None` under `--transport stdio`, where no `http::request::Parts`
+/// is attached to the context extensions.
+fn extract_forward_headers(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+) -> Option<http::HeaderMap> {
+    let parts = context.extensions.get::<http::request::Parts>()?;
+    Some(filter_forward_headers(&parts.headers))
 }
 
 fn map_upstream_content(item: UpstreamContent) -> Content {
@@ -202,6 +256,10 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         let session_id_ref = session_id.as_deref();
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
+        let forward_headers = extract_forward_headers(&context);
+        let exec_ctx = ExecuteContext {
+            forward_headers: forward_headers.as_ref(),
+        };
 
         let mut elicitation_results: Vec<serde_json::Value> = Vec::new();
         let mut elicit_context: Option<serde_json::Value> = None;
@@ -225,7 +283,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
             let response = self
                 .executor
-                .execute(&envelope, ExecuteContext::default())
+                .execute(&envelope, exec_ctx)
                 .await
                 .map_err(|e| {
                     error!("upstream executor error: {e}");
@@ -300,10 +358,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                                 request_id,
                                 request: cancel_request,
                             };
-                            if let Err(e) = self
-                                .executor
-                                .execute(&cancel_envelope, ExecuteContext::default())
-                                .await
+                            if let Err(e) = self.executor.execute(&cancel_envelope, exec_ctx).await
                             {
                                 warn!(
                                     "failed to notify upstream about elicitation cancellation: {e}"
@@ -347,6 +402,10 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         let session_id = extract_session_id(&context);
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
+        let forward_headers = extract_forward_headers(&context);
+        let exec_ctx = ExecuteContext {
+            forward_headers: forward_headers.as_ref(),
+        };
         let upstream_request = UpstreamRequest::ReadResource { uri: &request.uri };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
@@ -356,7 +415,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let response = self
             .executor
-            .execute(&envelope, ExecuteContext::default())
+            .execute(&envelope, exec_ctx)
             .await
             .map_err(|e| {
                 error!("upstream executor error: {e}");
@@ -412,6 +471,10 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         let session_id = extract_session_id(&context);
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
+        let forward_headers = extract_forward_headers(&context);
+        let exec_ctx = ExecuteContext {
+            forward_headers: forward_headers.as_ref(),
+        };
         let upstream_request = UpstreamRequest::GetPrompt {
             name: &request.name,
             arguments: request.arguments.as_ref(),
@@ -424,7 +487,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let response = self
             .executor
-            .execute(&envelope, ExecuteContext::default())
+            .execute(&envelope, exec_ctx)
             .await
             .map_err(|e| {
                 error!("upstream executor error: {e}");
@@ -472,5 +535,94 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                 None,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+    #[test]
+    fn is_dropped_header_drops_hop_by_hop() {
+        for name in [
+            "connection",
+            "Keep-Alive",
+            "Proxy-Authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "Transfer-Encoding",
+            "upgrade",
+        ] {
+            assert!(is_dropped_header(name), "expected {name} to be dropped");
+        }
+    }
+
+    #[test]
+    fn is_dropped_header_drops_roxy_managed() {
+        for name in ["Host", "content-type", "Content-Length"] {
+            assert!(is_dropped_header(name), "expected {name} to be dropped");
+        }
+    }
+
+    #[test]
+    fn is_dropped_header_keeps_pass_through_headers() {
+        for name in [
+            "Authorization",
+            "Cookie",
+            "X-My-Custom",
+            "Accept-Language",
+            "User-Agent",
+            "mcp-session-id",
+        ] {
+            assert!(!is_dropped_header(name), "expected {name} to be kept");
+        }
+    }
+
+    #[test]
+    fn filter_forward_headers_drops_hop_by_hop_and_keeps_the_rest() {
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer xyz"),
+        );
+        incoming.insert(
+            HeaderName::from_static("x-my-custom"),
+            HeaderValue::from_static("value"),
+        );
+        incoming.insert(
+            HeaderName::from_static("host"),
+            HeaderValue::from_static("mcp.example.com"),
+        );
+        incoming.insert(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
+        incoming.insert(
+            HeaderName::from_static("content-length"),
+            HeaderValue::from_static("123"),
+        );
+        incoming.insert(
+            HeaderName::from_static("mcp-session-id"),
+            HeaderValue::from_static("sess-1"),
+        );
+
+        let filtered = filter_forward_headers(&incoming);
+
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.get("authorization").unwrap(), "Bearer xyz");
+        assert_eq!(filtered.get("x-my-custom").unwrap(), "value");
+        assert_eq!(filtered.get("mcp-session-id").unwrap(), "sess-1");
+        assert!(filtered.get("host").is_none());
+        assert!(filtered.get("connection").is_none());
+        assert!(filtered.get("content-length").is_none());
+    }
+
+    #[test]
+    fn filter_forward_headers_handles_empty_input() {
+        let incoming = HeaderMap::new();
+        let filtered = filter_forward_headers(&incoming);
+        assert!(filtered.is_empty());
     }
 }
