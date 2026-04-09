@@ -234,15 +234,23 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                     return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
                 }
                 UpstreamCallResult::Elicit(elicit) => {
-                    let schema: ElicitationSchema = serde_json::from_value(elicit.schema.clone())
-                        .map_err(|e| {
-                        error!("invalid elicitation schema from PHP: {e}");
-                        McpError::internal_error(format!("invalid elicitation schema: {e}"), None)
-                    })?;
+                    let crate::protocol::UpstreamElicitResponse {
+                        message,
+                        schema,
+                        context: elicit_ctx,
+                    } = elicit;
+                    let schema: ElicitationSchema =
+                        serde_json::from_value(schema).map_err(|e| {
+                            error!("invalid elicitation schema from PHP: {e}");
+                            McpError::internal_error(
+                                format!("invalid elicitation schema: {e}"),
+                                None,
+                            )
+                        })?;
 
                     let params = CreateElicitationRequestParams::FormElicitationParams {
                         meta: None,
-                        message: elicit.message,
+                        message,
                         requested_schema: schema,
                     };
 
@@ -257,7 +265,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             if let Some(content) = elicit_result.content {
                                 elicitation_results.push(content);
                             }
-                            elicit_context = elicit.context;
+                            elicit_context = elicit_ctx;
                             // continue loop — re-invoke PHP with results
                         }
                         action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
@@ -271,7 +279,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             let cancel_request = UpstreamRequest::ElicitationCancelled {
                                 name: &request.name,
                                 action: action_str,
-                                context: elicit.context.as_ref(),
+                                context: elicit_ctx.as_ref(),
                             };
                             let cancel_envelope = UpstreamEnvelope {
                                 session_id: session_id_ref,
