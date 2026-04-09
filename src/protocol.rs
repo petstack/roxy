@@ -104,7 +104,9 @@ pub struct UpstreamContentResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpstreamContent {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ResourceLink {
         uri: String,
         name: String,
@@ -137,7 +139,8 @@ pub struct UpstreamElicitResponse {
 }
 
 /// Result of a tool/resource/prompt call (not discover).
-/// Parsed manually: if "elicit" key present -> Elicit, if "error" key present -> Error, else -> Content.
+/// Dispatch is based on which of `elicit`, `error`, or `content` is present in
+/// the JSON payload (checked in that priority order).
 #[derive(Debug)]
 pub enum UpstreamCallResult {
     Content(UpstreamContentResponse),
@@ -145,16 +148,34 @@ pub enum UpstreamCallResult {
     Elicit(UpstreamElicitResponse),
 }
 
+/// Raw shape used to parse every possible upstream response in a single pass.
+/// Avoids the double-parse of deserializing into `serde_json::Value` first.
+#[derive(Deserialize)]
+struct RawCallResult {
+    #[serde(default)]
+    elicit: Option<UpstreamElicitResponse>,
+    #[serde(default)]
+    error: Option<UpstreamError>,
+    #[serde(default)]
+    content: Option<Vec<UpstreamContent>>,
+    #[serde(default)]
+    structured_content: Option<serde_json::Value>,
+}
+
 impl UpstreamCallResult {
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
-        let value: serde_json::Value = serde_json::from_slice(bytes)?;
-        if value.get("elicit").is_some() {
-            let inner = value["elicit"].clone();
-            Ok(Self::Elicit(serde_json::from_value(inner)?))
-        } else if value.get("error").is_some() {
-            Ok(Self::Error(serde_json::from_value(value)?))
+        let raw: RawCallResult = serde_json::from_slice(bytes)?;
+        if let Some(elicit) = raw.elicit {
+            Ok(Self::Elicit(elicit))
+        } else if let Some(error) = raw.error {
+            Ok(Self::Error(UpstreamErrorResponse { error }))
+        } else if let Some(content) = raw.content {
+            Ok(Self::Content(UpstreamContentResponse {
+                content,
+                structured_content: raw.structured_content,
+            }))
         } else {
-            Ok(Self::Content(serde_json::from_value(value)?))
+            anyhow::bail!("upstream response has no 'elicit', 'error', or 'content' field")
         }
     }
 }
@@ -324,7 +345,10 @@ mod tests {
         assert!(resp.tools[0].output_schema.is_some());
         assert_eq!(resp.resources[0].title.as_deref(), Some("Server Status"));
         assert_eq!(resp.prompts[0].title.as_deref(), Some("Greeting"));
-        assert_eq!(resp.prompts[0].arguments[0].title.as_deref(), Some("Person Name"));
+        assert_eq!(
+            resp.prompts[0].arguments[0].title.as_deref(),
+            Some("Person Name")
+        );
     }
 
     #[test]
@@ -336,7 +360,9 @@ mod tests {
         let resp: UpstreamContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.content.len(), 2);
         assert!(matches!(&resp.content[0], UpstreamContent::Text { .. }));
-        assert!(matches!(&resp.content[1], UpstreamContent::ResourceLink { uri, .. } if uri == "roxy://b/1"));
+        assert!(
+            matches!(&resp.content[1], UpstreamContent::ResourceLink { uri, .. } if uri == "roxy://b/1")
+        );
     }
 
     #[test]
@@ -347,6 +373,29 @@ mod tests {
         }"#;
         let resp: UpstreamContentResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.structured_content.as_ref().unwrap()["id"], 42);
+    }
+
+    #[test]
+    fn test_upstream_call_result_parses_content_with_structured() {
+        let json = br#"{
+            "content": [{"type": "text", "text": "OK"}],
+            "structured_content": {"id": 42, "status": "ok"}
+        }"#;
+        let result = UpstreamCallResult::parse(json).unwrap();
+        match result {
+            UpstreamCallResult::Content(c) => {
+                assert_eq!(c.content.len(), 1);
+                assert_eq!(c.structured_content.as_ref().unwrap()["id"], 42);
+                assert_eq!(c.structured_content.as_ref().unwrap()["status"], "ok");
+            }
+            _ => panic!("expected Content variant"),
+        }
+    }
+
+    #[test]
+    fn test_upstream_call_result_parse_invalid_has_no_known_keys() {
+        let json = br#"{"unknown": "payload"}"#;
+        assert!(UpstreamCallResult::parse(json).is_err());
     }
 
     #[test]
