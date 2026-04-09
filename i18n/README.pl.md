@@ -204,7 +204,7 @@ roxy [OPTIONS] --upstream <UPSTREAM>
 | `--upstream-entrypoint <PATH>` | — | `SCRIPT_FILENAME` wysyłany do backendów FastCGI (wymagane dla PHP-FPM) |
 | `--upstream-insecure` | `false` | Pomiń weryfikację certyfikatu TLS dla upstreamów HTTPS |
 | `--upstream-timeout <SECS>` | `30` | Timeout żądania HTTP upstream w sekundach |
-| `--upstream-header <HEADER>` | — | Niestandardowy nagłówek HTTP, `Name: Value`. Można powtarzać |
+| `--upstream-header <HEADER>` | — | Statyczny nagłówek HTTP dołączany do każdego żądania do upstreamu HTTP, `Name: Value`. Można powtarzać. Tylko dla upstreamów HTTP — ignorowany dla FastCGI |
 | `--pool-size <N>` | `16` | Rozmiar puli połączeń FastCGI |
 | `--log-format <FORMAT>` | `pretty` | Format logów: `pretty` lub `json` |
 
@@ -238,6 +238,19 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Przekazywanie nagłówków klienta
+
+Przy `--transport http` każdy nagłówek przychodzącego żądania klienta MCP jest automatycznie przekazywany do backendu upstream — bez żadnej konfiguracji. Nagłówki hop-by-hop (RFC 7230 §6.1: `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) oraz nagłówki zarządzane przez roxy (`Host`, `Content-Type`, `Content-Length`) są odfiltrowywane. Wszystko pozostałe — `Authorization`, `Cookie`, `X-Forwarded-For`, niestandardowe nagłówki `X-*`, `mcp-session-id` — dociera do upstreamu bez zmian. Odzwierciedla to domyślne zachowanie nginx `fastcgi_pass` / `proxy_pass` i pozwala backendowi upstream uwierzytelniać końcowego klienta (walidacja tokenów bearer, sprawdzanie ciasteczek sesji) bez konieczności rozumienia tego schematu przez roxy.
+
+| Upstream | Forma transportu |
+|---|---|
+| HTTP | Przekazywany jako prawdziwe nagłówki żądania HTTP. Nagłówki wielowartościowe (np. dwa wpisy `X-Forwarded-For`) są zachowywane. |
+| FastCGI | Tłumaczony na parametry CGI `HTTP_*` zgodnie z RFC 3875 §4.1.18 — handlery PHP odczytują je z `$_SERVER['HTTP_AUTHORIZATION']`, `$_SERVER['HTTP_X_FORWARDED_FOR']` itd. Nagłówki wielowartościowe są łączone z `", "` dla zachowania semantyki nginx `$http_*`. |
+
+`--upstream-header` nadal działa jak dotychczas dla upstreamów HTTP — dostarcza roxy jego **własną** statyczną tożsamość do upstreamu (token serwisowy, stały `X-Client-Id` itp.). Gdy nagłówek przekazany od klienta koliduje ze statycznym `--upstream-header` o tej samej nazwie, wartość przekazana przez klienta **wygrywa**: tożsamość wywołującego per-request jest bardziej szczegółowa niż wartość domyślna roxy, co odpowiada typowemu zachowaniu reverse proxy. `--upstream-header` jest obecnie ignorowany dla upstreamów FastCGI — zamiast tego należy korzystać z automatycznego przekazywania.
+
+Przy `--transport stdio` nie ma przychodzącego żądania HTTP, więc żadne nagłówki nie są przekazywane; statyczne wpisy `--upstream-header` nadal stosują się do upstreamów HTTP jak zwykle.
 
 ### Zmienne środowiskowe
 

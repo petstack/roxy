@@ -204,7 +204,7 @@ roxy [OPTIONS] --upstream <UPSTREAM>
 | `--upstream-entrypoint <PATH>` | — | FastCGI バックエンドに送信される `SCRIPT_FILENAME` (PHP-FPM には必須) |
 | `--upstream-insecure` | `false` | HTTPS upstream の TLS 証明書検証をスキップ |
 | `--upstream-timeout <SECS>` | `30` | HTTP upstream リクエストのタイムアウト (秒) |
-| `--upstream-header <HEADER>` | — | カスタム HTTP ヘッダー、`Name: Value`。繰り返し可能 |
+| `--upstream-header <HEADER>` | — | HTTP upstream へのすべてのリクエストに付与される静的 HTTP ヘッダー、`Name: Value`。繰り返し可能。HTTP upstream のみ有効 — FastCGI では無視される |
 | `--pool-size <N>` | `16` | FastCGI コネクションプールのサイズ |
 | `--log-format <FORMAT>` | `pretty` | ログ形式: `pretty` または `json` |
 
@@ -238,6 +238,19 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### クライアントヘッダーの転送
+
+`--transport http` では、MCP クライアントから届くすべての HTTP ヘッダーが自動的に upstream バックエンドへ転送されます — 設定は不要です。ホップバイホップヘッダー (RFC 7230 §6.1: `Connection`、`Keep-Alive`、`Proxy-Authenticate`、`Proxy-Authorization`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade`) と roxy 自身が管理するヘッダー (`Host`、`Content-Type`、`Content-Length`) は除外されます。それ以外のすべて — `Authorization`、`Cookie`、`X-Forwarded-For`、カスタムの `X-*` ヘッダー、`mcp-session-id` — は変更なく upstream に届きます。これは nginx の `fastcgi_pass` / `proxy_pass` のデフォルト動作を踏襲しており、upstream バックエンドがエンドクライアントを認証 (ベアラートークンの検証、セッション Cookie の検査) できるようにするためのものです。roxy 自身が認証スキームを理解する必要はありません。
+
+| Upstream | 転送形式 |
+|---|---|
+| HTTP | 実際の HTTP リクエストヘッダーとして転送されます。複数値のヘッダー (例: 2 つの `X-Forwarded-For` エントリ) もそのまま保持されます。 |
+| FastCGI | RFC 3875 §4.1.18 に従い CGI の `HTTP_*` パラメーターに変換されます — PHP ハンドラーは `$_SERVER['HTTP_AUTHORIZATION']`、`$_SERVER['HTTP_X_FORWARDED_FOR']` などから読み取れます。複数値のヘッダーは nginx の `$http_*` セマンティクスに合わせて `", "` で結合されます。 |
+
+`--upstream-header` は HTTP upstream に対してこれまで通り機能します — roxy 自身の**静的な**識別情報 (サービストークン、固定の `X-Client-Id` など) を upstream に渡すために使用します。クライアントから転送されたヘッダーと同名の静的 `--upstream-header` が衝突した場合、転送された値が**優先**されます: 呼び出し元のリクエストごとの識別情報は roxy のデフォルトよりも具体的であり、リバースプロキシの一般的な動作に倣っています。`--upstream-header` は現在 FastCGI upstream では無効です — 代わりに自動転送をご利用ください。
+
+`--transport stdio` では受信 HTTP リクエストが存在しないため、ヘッダーは転送されません。静的な `--upstream-header` エントリは HTTP upstream に対して通常通り適用されます。
 
 ### 環境変数
 

@@ -204,7 +204,7 @@ roxy [OPTIONS] --upstream <UPSTREAM>
 | `--upstream-entrypoint <PATH>` | — | `SCRIPT_FILENAME`, що надсилається у FastCGI-бекенд (обов’язковий для PHP-FPM) |
 | `--upstream-insecure` | `false` | Пропускати перевірку TLS-сертифікатів для HTTPS-upstream’ів |
 | `--upstream-timeout <SECS>` | `30` | Таймаут HTTP-upstream запиту в секундах |
-| `--upstream-header <HEADER>` | — | Довільний HTTP-заголовок, `Name: Value`. Можна вказувати кілька разів |
+| `--upstream-header <HEADER>` | — | Статичний HTTP-заголовок, що додається до кожного запиту до HTTP-upstream, `Name: Value`. Можна вказувати кілька разів. Тільки для HTTP-upstream — ігнорується для FastCGI |
 | `--pool-size <N>` | `16` | Розмір пулу з’єднань FastCGI |
 | `--log-format <FORMAT>` | `pretty` | Формат логів: `pretty` або `json` |
 
@@ -238,6 +238,19 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Перенаправлення заголовків клієнта
+
+При використанні `--transport http` кожен вхідний заголовок MCP-клієнта автоматично пересилається до upstream-бекенда — жодного додаткового налаштування не потрібно. Hop-by-hop заголовки (RFC 7230 §6.1: `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) та заголовки, якими керує сам roxy (`Host`, `Content-Type`, `Content-Length`), відфільтровуються. Усе інше — `Authorization`, `Cookie`, `X-Forwarded-For`, власні `X-*`-заголовки, `mcp-session-id` — досягає upstream'а у незмінному вигляді. Це відповідає поведінці nginx `fastcgi_pass` / `proxy_pass` за замовчуванням і дозволяє upstream-бекенду автентифікувати кінцевого клієнта (перевіряти bearer-токени, аналізувати сесійні cookie) без необхідності для roxy розуміти схему автентифікації.
+
+| Upstream | Форма транспорту |
+|---|---|
+| HTTP | Пересилається як справжні HTTP-заголовки запиту. Заголовки з кількома значеннями (наприклад, два записи `X-Forwarded-For`) зберігаються. |
+| FastCGI | Перетворюється на CGI-параметри `HTTP_*` згідно з RFC 3875 §4.1.18 — PHP-обробники читають їх з `$_SERVER['HTTP_AUTHORIZATION']`, `$_SERVER['HTTP_X_FORWARDED_FOR']` тощо. Заголовки з кількома значеннями об'єднуються через `", "`, що відповідає семантиці nginx `$http_*`. |
+
+`--upstream-header` продовжує працювати як раніше для HTTP-upstream'ів — він визначає **власну** статичну ідентичність roxy щодо upstream'а (service-токен, фіксований `X-Client-Id` тощо). Якщо пересланий заголовок клієнта збігається за іменем зі статичним заголовком `--upstream-header`, перемагає пересланий заголовок: ідентичність виклику на рівні запиту є конкретнішою, ніж значення roxy за замовчуванням — це відповідає типовій поведінці зворотного проксі. `--upstream-header` наразі не має ефекту для FastCGI-upstream'ів — використовуйте натомість автоматичне перенаправлення.
+
+При використанні `--transport stdio` вхідного HTTP-запиту немає, тому заголовки не пересилаються; статичні записи `--upstream-header` як і раніше застосовуються до HTTP-upstream'ів.
 
 ### Змінні середовища
 

@@ -204,7 +204,7 @@ roxy [OPTIONS] --upstream <UPSTREAM>
 | `--upstream-entrypoint <PATH>` | — | 发送给 FastCGI 后端的 `SCRIPT_FILENAME`(PHP-FPM 必需) |
 | `--upstream-insecure` | `false` | 跳过 HTTPS 上游的 TLS 证书验证 |
 | `--upstream-timeout <SECS>` | `30` | HTTP 上游请求超时(秒) |
-| `--upstream-header <HEADER>` | — | 自定义 HTTP 头,`Name: Value`。可重复 |
+| `--upstream-header <HEADER>` | — | 附加到每个 HTTP 上游请求的静态 HTTP 头,`Name: Value`。可重复。仅适用于 HTTP 上游——对 FastCGI 无效 |
 | `--pool-size <N>` | `16` | FastCGI 连接池大小 |
 | `--log-format <FORMAT>` | `pretty` | 日志格式:`pretty` 或 `json` |
 
@@ -238,6 +238,19 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### 转发客户端请求头
+
+在 `--transport http` 模式下，每个来自 MCP 客户端的请求头都会自动转发到上游后端——无需任何配置。逐跳头部（RFC 7230 §6.1：`Connection`、`Keep-Alive`、`Proxy-Authenticate`、`Proxy-Authorization`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade`）以及 roxy 自身管理的头部（`Host`、`Content-Type`、`Content-Length`）会被过滤掉。其余所有头部——`Authorization`、`Cookie`、`X-Forwarded-For`、自定义 `X-*` 头部、`mcp-session-id`——均原样传达上游。这与 nginx `fastcgi_pass` / `proxy_pass` 的默认行为一致，目的是让你的上游后端能够对终端客户端进行认证（校验 bearer token、检查 session cookie），而无需 roxy 理解具体的认证方案。
+
+| 上游类型 | 转发形式 |
+|---|---|
+| HTTP | 作为真实 HTTP 请求头转发。多值头部（例如两个 `X-Forwarded-For` 条目）会被完整保留。 |
+| FastCGI | 按照 RFC 3875 §4.1.18 转换为 CGI `HTTP_*` 参数——PHP 处理器从 `$_SERVER['HTTP_AUTHORIZATION']`、`$_SERVER['HTTP_X_FORWARDED_FOR']` 等读取。多值头部以 `", "` 连接，与 nginx `$http_*` 语义保持一致。 |
+
+`--upstream-header` 对 HTTP 上游的工作方式与以前相同——它为 roxy **自身**向上游提供静态身份标识（服务 token、固定的 `X-Client-Id` 等）。当客户端转发的头部与某个静态 `--upstream-header` 的名称冲突时，转发值**优先**：调用方的每请求身份比 roxy 的默认值更具体，与反向代理的惯常行为一致。`--upstream-header` 对 FastCGI 上游目前不生效——请改用自动转发。
+
+在 `--transport stdio` 模式下，不存在传入的 HTTP 请求，因此不会转发任何头部；静态 `--upstream-header` 条目仍照常作用于 HTTP 上游。
 
 ### 环境变量
 
