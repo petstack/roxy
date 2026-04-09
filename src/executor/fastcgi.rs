@@ -29,34 +29,42 @@ pub fn derive_script_name(entrypoint: &str) -> String {
 
 /// Convert an HTTP header name to its CGI `HTTP_*` parameter name per
 /// RFC 3875 §4.1.18: upper-case and replace `-` with `_`, then prefix
-/// with `HTTP_`.
+/// with `HTTP_`. Input is assumed ASCII — the `http` crate enforces
+/// ASCII on `HeaderName` construction, so callers always pass ASCII.
 #[doc(hidden)]
 pub fn cgi_header_param(name: &str) -> String {
     let mut out = String::with_capacity(5 + name.len());
     out.push_str("HTTP_");
-    for c in name.chars() {
-        out.push(if c == '-' {
-            '_'
+    for b in name.bytes() {
+        let mapped = if b == b'-' {
+            b'_'
         } else {
-            c.to_ascii_uppercase()
-        });
+            b.to_ascii_uppercase()
+        };
+        out.push(mapped as char);
     }
     out
 }
 
 /// Construct the full `Params` map for a FastCGI request. Pure function
 /// (no I/O, no pool access) so the CGI-param shape can be unit-tested
-/// without a live PHP-FPM.
+/// without a live PHP-FPM. Takes the body slice directly so
+/// `CONTENT_LENGTH` is computed from the same bytes PHP-FPM will see —
+/// no opportunity for a caller to pass a mismatched length.
 ///
 /// Forward headers — when present — are added as `HTTP_*` CGI variables
 /// per RFC 3875 §4.1.18. Non-UTF-8 header values are silently dropped,
 /// since CGI params must be ASCII and MCP clients in practice only send
-/// text headers.
+/// text headers. Multi-valued headers (e.g. two `X-Forwarded-For`
+/// entries from an upstream proxy chain) are joined with `", "` to
+/// match nginx's `$http_*` variable semantics; CGI has no native
+/// multi-value representation and last-write-wins would silently drop
+/// proxy-chain history.
 fn build_fcgi_params<'a>(
     script_filename: &'a str,
     script_name: &'a str,
     request_uri: &'a str,
-    content_length: usize,
+    body: &[u8],
     forward_headers: Option<&http::HeaderMap>,
 ) -> Params<'a> {
     let mut params = Params::default()
@@ -65,16 +73,24 @@ fn build_fcgi_params<'a>(
         .script_name(script_name)
         .request_uri(request_uri)
         .content_type("application/json")
-        .content_length(content_length)
+        .content_length(body.len())
         .server_name("localhost")
         .server_port(0);
 
     if let Some(headers) = forward_headers {
-        for (name, value) in headers {
-            let Ok(value_str) = value.to_str() else {
+        // Iterate unique header names via `keys()`, then collect every
+        // UTF-8-valid value via `get_all()`. This preserves multi-value
+        // semantics through the CGI boundary.
+        for name in headers.keys() {
+            let values: Vec<&str> = headers
+                .get_all(name)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .collect();
+            if values.is_empty() {
                 continue;
-            };
-            params = params.custom(cgi_header_param(name.as_str()), value_str.to_owned());
+            }
+            params = params.custom(cgi_header_param(name.as_str()), values.join(", "));
         }
     }
 
@@ -192,7 +208,7 @@ impl FastCgiExecutor {
             &self.script_filename,
             &self.script_name,
             &self.request_uri,
-            body.len(),
+            body,
             ctx.forward_headers,
         );
 
@@ -406,7 +422,8 @@ mod tests {
         let script_filename = "/var/www/app/handler.php";
         let script_name = "/handler.php";
         let request_uri = "/handler.php";
-        let params = build_fcgi_params(script_filename, script_name, request_uri, 42, None);
+        let body = [0u8; 42];
+        let params = build_fcgi_params(script_filename, script_name, request_uri, &body, None);
 
         assert_eq!(
             params.get("SCRIPT_FILENAME").unwrap().as_ref(),
@@ -444,7 +461,7 @@ mod tests {
             "/var/www/handler.php",
             "/handler.php",
             "/handler.php",
-            0,
+            b"",
             Some(&forward),
         );
 
@@ -477,12 +494,46 @@ mod tests {
             "/var/www/handler.php",
             "/handler.php",
             "/handler.php",
-            0,
+            b"",
             Some(&forward),
         );
 
         assert!(params.get("HTTP_X_BINARY").is_none());
         assert_eq!(params.get("HTTP_X_TEXT").unwrap().as_ref(), "ok");
+    }
+
+    #[test]
+    fn build_fcgi_params_coalesces_multi_value_headers() {
+        // filter_forward_headers in server.rs preserves multi-valued
+        // headers via append; build_fcgi_params must coalesce them into
+        // a single HTTP_* variable because CGI has no multi-value
+        // representation. Join with ", " matches nginx's $http_*
+        // semantics and preserves proxy-chain history for headers like
+        // X-Forwarded-For.
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut forward = HeaderMap::new();
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.2"),
+        );
+
+        let params = build_fcgi_params(
+            "/var/www/handler.php",
+            "/handler.php",
+            "/handler.php",
+            b"",
+            Some(&forward),
+        );
+
+        assert_eq!(
+            params.get("HTTP_X_FORWARDED_FOR").unwrap().as_ref(),
+            "10.0.0.1, 10.0.0.2"
+        );
     }
 
     /// Exercises the stale-connection-recovery contract that real FastCGI
