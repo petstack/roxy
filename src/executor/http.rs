@@ -17,17 +17,34 @@ use super::{ExecuteContext, UpstreamExecutor};
 /// `reqwest::header::HeaderMap` is a re-export of `http::HeaderMap`
 /// (same type underneath), so the argument types are interchangeable —
 /// the differentiated names here make the cross-crate boundary explicit.
+///
+/// Multi-valued forward headers (e.g. two `X-Forwarded-For` entries
+/// from an upstream proxy chain) are preserved. `filter_forward_headers`
+/// in `server.rs` deliberately uses `append` to keep every value, and
+/// unlike CGI, HTTP can carry multi-value natively — so we iterate
+/// unique names via `keys()`, clear any colliding static entry with a
+/// single `insert`, then `append` the remainder of the values for that
+/// name.
 fn merge_forward_headers(
     static_headers: &reqwest::header::HeaderMap,
     forward: Option<&http::HeaderMap>,
 ) -> reqwest::header::HeaderMap {
     let mut out = static_headers.clone();
     if let Some(extra) = forward {
-        for (name, value) in extra {
-            // `insert` removes every existing entry for this name and
-            // replaces it with the new value. `append` would keep the
-            // static entry, which is the wrong semantic here.
-            out.insert(name.clone(), value.clone());
+        for name in extra.keys() {
+            let mut values = extra.get_all(name).iter();
+            // `insert` removes every existing entry for this name
+            // (including any static entry we just cloned) and places
+            // the first forward value. This is the "forward replaces
+            // static on collision" semantic from the spec.
+            if let Some(first) = values.next() {
+                out.insert(name.clone(), first.clone());
+            }
+            // Any remaining values for the same name are appended so
+            // multi-valued forward headers survive the merge.
+            for rest in values {
+                out.append(name.clone(), rest.clone());
+            }
         }
     }
     out
@@ -258,5 +275,102 @@ mod tests {
         // Exactly one Authorization header, and it's the client's.
         assert_eq!(merged.get_all("authorization").iter().count(), 1);
         assert_eq!(merged.get("authorization").unwrap(), "Bearer client");
+    }
+
+    #[test]
+    fn merge_forward_headers_preserves_multi_value_forward_headers() {
+        // Guards the keys()+insert()+append() loop: a naïve
+        // `for (name, value) in forward { out.insert(...) }` loop would
+        // collapse a multi-valued X-Forwarded-For to its last value,
+        // silently losing proxy-chain history. This test fails under
+        // the collapse bug and passes under the correct implementation.
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut static_headers = HeaderMap::new();
+        static_headers.insert(
+            HeaderName::from_static("x-service"),
+            HeaderValue::from_static("roxy"),
+        );
+
+        let mut forward = HeaderMap::new();
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.2"),
+        );
+
+        let merged = merge_forward_headers(&static_headers, Some(&forward));
+
+        // Static header still present.
+        assert_eq!(merged.get("x-service").unwrap(), "roxy");
+
+        // Both forwarded values must survive.
+        let xff_values: Vec<&str> = merged
+            .get_all("x-forwarded-for")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(xff_values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    #[test]
+    fn merge_forward_headers_multi_value_forward_replaces_static_then_accumulates() {
+        // When forward has N values for a name that static also sets,
+        // every static entry for that name must be cleared before the
+        // first append — otherwise the static value would appear
+        // alongside the forward values.
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut static_headers = HeaderMap::new();
+        static_headers.insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.255.255.255"),
+        );
+
+        let mut forward = HeaderMap::new();
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.2"),
+        );
+
+        let merged = merge_forward_headers(&static_headers, Some(&forward));
+
+        let xff_values: Vec<&str> = merged
+            .get_all("x-forwarded-for")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(xff_values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    #[test]
+    fn new_places_upstream_headers_in_static_not_client_defaults() {
+        // Regression guard for the Content-Type / --upstream-header
+        // split: the former stays on the reqwest Client as a default,
+        // the latter goes to HttpExecutor.static_headers. A future
+        // refactor that re-merges them would produce double Content-Type
+        // headers on the wire; this test catches it at the executor
+        // boundary.
+        let executor = HttpExecutor::new(
+            "http://localhost:8000/handler".to_string(),
+            30,
+            false,
+            &["Authorization: Bearer token".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(executor.static_headers.len(), 1);
+        assert_eq!(
+            executor.static_headers.get("authorization").unwrap(),
+            "Bearer token"
+        );
+        assert!(executor.static_headers.get("content-type").is_none());
     }
 }
