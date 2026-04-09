@@ -27,6 +27,25 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "body_start"
+harness = false
+
+[[bench]]
+name = "request_id"
+harness = false
+
+[[bench]]
+name = "envelope"
+harness = false
+
 # -----------------------------------------------------------------------------
 # cargo-deb: Debian/Ubuntu .deb package
 # -----------------------------------------------------------------------------
