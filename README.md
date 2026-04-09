@@ -25,6 +25,7 @@ This lets you write MCP servers in **any language** — PHP, Python, Node, Go, R
   - [Verify the installation](#verify-the-installation)
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
+  - [Environment variables](#environment-variables)
 - [Writing an upstream handler](#writing-an-upstream-handler)
 - [Upstream protocol reference](#upstream-protocol-reference)
   - [Request types](#request-types)
@@ -237,6 +238,51 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Environment variables
+
+All CLI flags accept a corresponding `ROXY_*` environment variable as an optional fallback. Resolution order is **CLI > env > default**: a flag supplied on the command line always wins, the env variable is consulted only if the flag is absent, and the built-in default is used only when neither is present.
+
+| Flag | Env variable | Example |
+|---|---|---|
+| `--transport` | `ROXY_TRANSPORT` | `stdio` \| `http` |
+| `--port` | `ROXY_PORT` | `8080` |
+| `--upstream` | `ROXY_UPSTREAM` | `http://localhost:8000/handler` |
+| `--upstream-entrypoint` | `ROXY_UPSTREAM_ENTRYPOINT` | `/srv/handler.php` |
+| `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `true` \| `false` |
+| `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` | `30` |
+| `--upstream-header` | `ROXY_UPSTREAM_HEADER` | newline-separated, see below |
+| `--pool-size` | `ROXY_POOL_SIZE` | `16` |
+| `--log-format` | `ROXY_LOG_FORMAT` | `pretty` \| `json` |
+
+#### Multiple `upstream-header` values
+
+`ROXY_UPSTREAM_HEADER` accepts multiple header lines separated by literal newlines. This maps naturally onto a Kubernetes YAML block scalar:
+
+```yaml
+env:
+  - name: ROXY_UPSTREAM_HEADER
+    value: |-
+      Authorization: Bearer xyz
+      X-Trace-Id: abc
+```
+
+From a local shell, use `$'...'` quoting so the `\n` becomes a real newline:
+
+```bash
+ROXY_UPSTREAM_HEADER=$'Authorization: Bearer xyz\nX-Trace-Id: abc' \
+  roxy --upstream https://api.example.com/mcp
+```
+
+Leading and trailing blank lines are discarded at startup, so YAML `|-` block scalar quirks don't produce malformed headers. If `--upstream-header` is passed on the CLI at all, `ROXY_UPSTREAM_HEADER` is ignored entirely — there is no merging of the two sources.
+
+#### Boolean values
+
+`ROXY_UPSTREAM_INSECURE` accepts only the **exact lowercase strings** `true` or `false`. Numeric forms (`1`, `0`) and other casings (`TRUE`, `True`, `YES`, `on`) are rejected by clap's `SetTrue + env` parser and fail at startup. The CLI flag `--upstream-insecure` (with no value) continues to work as before and simply means `true`.
+
+#### `RUST_LOG`
+
+roxy honours the standard `RUST_LOG` environment variable, read at startup by `tracing_subscriber::EnvFilter`; this is orthogonal to the `ROXY_*` variables above and unchanged.
 
 ## Writing an upstream handler
 
