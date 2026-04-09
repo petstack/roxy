@@ -17,8 +17,7 @@ use super::{ExecuteContext, UpstreamExecutor};
 /// the entrypoint has no file component (empty string, bare `/`, etc.).
 /// The entrypoint string itself is **not** returned — callers still use
 /// it unchanged as `SCRIPT_FILENAME`.
-#[doc(hidden)]
-pub fn derive_script_name(entrypoint: &str) -> String {
+fn derive_script_name(entrypoint: &str) -> String {
     let base = std::path::Path::new(entrypoint)
         .file_name()
         .and_then(|s| s.to_str())
@@ -31,8 +30,7 @@ pub fn derive_script_name(entrypoint: &str) -> String {
 /// RFC 3875 §4.1.18: upper-case and replace `-` with `_`, then prefix
 /// with `HTTP_`. Input is assumed ASCII — the `http` crate enforces
 /// ASCII on `HeaderName` construction, so callers always pass ASCII.
-#[doc(hidden)]
-pub fn cgi_header_param(name: &str) -> String {
+fn cgi_header_param(name: &str) -> String {
     let mut out = String::with_capacity(5 + name.len());
     out.push_str("HTTP_");
     for b in name.bytes() {
