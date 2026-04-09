@@ -102,11 +102,22 @@ impl FcgiAddress {
     }
 }
 
+/// Drop whitespace-only or empty entries from a header list.
+///
+/// The main input to this helper is a `Vec<String>` that came from clap,
+/// where a trailing/leading `\n` in `ROXY_UPSTREAM_HEADER` (e.g. from a
+/// Kubernetes YAML `|-` block scalar) or an empty env var can produce
+/// spurious empty slots. Filtering them here keeps the rest of the
+/// pipeline simple.
+pub fn normalize_header_list(raw: Vec<String>) -> Vec<String> {
+    raw.into_iter().filter(|s| !s.trim().is_empty()).collect()
+}
+
 /// Parse a "Name: Value" header string into (name, value) tuple.
 pub fn parse_header(s: &str) -> anyhow::Result<(String, String)> {
-    let pos = s
-        .find(':')
-        .ok_or_else(|| anyhow::anyhow!("invalid header format: expected 'Name: Value', got '{s}'"))?;
+    let pos = s.find(':').ok_or_else(|| {
+        anyhow::anyhow!("invalid header format: expected 'Name: Value', got '{s}'")
+    })?;
     let name = s[..pos].trim().to_string();
     let value = s[pos + 1..].trim().to_string();
     Ok((name, value))
@@ -173,5 +184,41 @@ mod tests {
     #[test]
     fn test_parse_header_invalid() {
         assert!(parse_header("no-colon-here").is_err());
+    }
+
+    #[test]
+    fn normalize_header_list_empty() {
+        let out = normalize_header_list(Vec::<String>::new());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn normalize_header_list_drops_empty_strings() {
+        let out =
+            normalize_header_list(vec!["A: 1".to_string(), "".to_string(), "B: 2".to_string()]);
+        assert_eq!(out, vec!["A: 1".to_string(), "B: 2".to_string()]);
+    }
+
+    #[test]
+    fn normalize_header_list_drops_whitespace_only() {
+        let out =
+            normalize_header_list(vec!["   ".to_string(), "\t".to_string(), "\n".to_string()]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn normalize_header_list_preserves_order_in_mixed_input() {
+        let out = normalize_header_list(vec![
+            "".to_string(),
+            "A: 1".to_string(),
+            "   ".to_string(),
+            "B: 2".to_string(),
+            "\n".to_string(),
+            "C: 3".to_string(),
+        ]);
+        assert_eq!(
+            out,
+            vec!["A: 1".to_string(), "B: 2".to_string(), "C: 3".to_string()]
+        );
     }
 }
