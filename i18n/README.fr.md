@@ -25,6 +25,7 @@ Cela vous permet d'écrire des serveurs MCP dans **n'importe quel langage** — 
   - [Vérifier l'installation](#vérifier-linstallation)
 - [Démarrage rapide](#démarrage-rapide)
 - [Référence CLI](#référence-cli)
+  - [Variables d'environnement](#variables-denvironnement)
 - [Écriture d'un gestionnaire upstream](#écriture-dun-gestionnaire-upstream)
 - [Référence du protocole upstream](#référence-du-protocole-upstream)
   - [Types de requêtes](#types-de-requêtes)
@@ -237,6 +238,51 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Variables d'environnement
+
+Toutes les options CLI acceptent une variable d'environnement `ROXY_*` correspondante comme valeur de repli optionnelle. L'ordre de résolution est **CLI > env > default** : une option fournie en ligne de commande l'emporte toujours, la variable d'environnement n'est consultée qu'en l'absence de l'option, et la valeur par défaut intégrée n'est utilisée que si aucune des deux n'est présente.
+
+| Option | Env variable | Exemple |
+|---|---|---|
+| `--transport` | `ROXY_TRANSPORT` | `stdio` \| `http` |
+| `--port` | `ROXY_PORT` | `8080` |
+| `--upstream` | `ROXY_UPSTREAM` | `http://localhost:8000/handler` |
+| `--upstream-entrypoint` | `ROXY_UPSTREAM_ENTRYPOINT` | `/srv/handler.php` |
+| `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `true` \| `false` |
+| `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` | `30` |
+| `--upstream-header` | `ROXY_UPSTREAM_HEADER` | séparés par des sauts de ligne, voir ci-dessous |
+| `--pool-size` | `ROXY_POOL_SIZE` | `16` |
+| `--log-format` | `ROXY_LOG_FORMAT` | `pretty` \| `json` |
+
+#### Plusieurs valeurs upstream-header
+
+`ROXY_UPSTREAM_HEADER` accepte plusieurs lignes d'en-tête séparées par de vrais sauts de ligne. Cela s'applique naturellement à un scalaire de bloc YAML Kubernetes :
+
+```yaml
+env:
+  - name: ROXY_UPSTREAM_HEADER
+    value: |-
+      Authorization: Bearer xyz
+      X-Trace-Id: abc
+```
+
+Depuis un shell local, utilisez le quoting `$'...'` pour que `\n` devienne un vrai saut de ligne :
+
+```bash
+ROXY_UPSTREAM_HEADER=$'Authorization: Bearer xyz\nX-Trace-Id: abc' \
+  roxy --upstream https://api.example.com/mcp
+```
+
+Les lignes vides en début et en fin sont supprimées au démarrage, de sorte que les particularités du scalaire de bloc YAML `|-` ne produisent pas d'en-têtes malformés. Si `--upstream-header` est passé en CLI, `ROXY_UPSTREAM_HEADER` est entièrement ignoré — il n'y a pas de fusion des deux sources.
+
+#### Valeurs booléennes
+
+`ROXY_UPSTREAM_INSECURE` n'accepte que les **chaînes exactes en minuscules** `true` ou `false`. Les formes numériques (`1`, `0`) et les autres casses (`TRUE`, `True`, `YES`, `on`) sont rejetées par le parser clap (`SetTrue + env`) et provoquent une erreur au démarrage. L'option CLI `--upstream-insecure` (sans valeur) continue de fonctionner comme avant et signifie simplement `true`.
+
+#### `RUST_LOG`
+
+roxy respecte la variable d'environnement standard `RUST_LOG`, lue au démarrage par `tracing_subscriber::EnvFilter` ; elle est orthogonale aux variables `ROXY_*` ci-dessus et reste inchangée.
 
 ## Écriture d'un gestionnaire upstream
 

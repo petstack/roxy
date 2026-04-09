@@ -25,6 +25,7 @@ roxy з’єднує MCP-клієнтів (Claude Desktop, Cursor, Zed тощо)
   - [Перевірка встановлення](#перевірка-встановлення)
 - [Швидкий старт](#швидкий-старт)
 - [Довідник CLI](#довідник-cli)
+  - [Змінні середовища](#змінні-середовища)
 - [Написання upstream-обробника](#написання-upstream-обробника)
 - [Довідник upstream-протоколу](#довідник-upstream-протоколу)
   - [Типи запитів](#типи-запитів)
@@ -237,6 +238,51 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### Змінні середовища
+
+Усі прапорці CLI приймають відповідну змінну середовища `ROXY_*` як необов'язкове запасне значення. Порядок пріоритету: **CLI > env > default**: прапорець, переданий у командному рядку, завжди перемагає; змінна середовища використовується лише за відсутності прапорця; вбудоване значення за замовчуванням застосовується, тільки якщо не задано ні те, ні інше.
+
+| Прапорець | Env variable | Приклад |
+|---|---|---|
+| `--transport` | `ROXY_TRANSPORT` | `stdio` \| `http` |
+| `--port` | `ROXY_PORT` | `8080` |
+| `--upstream` | `ROXY_UPSTREAM` | `http://localhost:8000/handler` |
+| `--upstream-entrypoint` | `ROXY_UPSTREAM_ENTRYPOINT` | `/srv/handler.php` |
+| `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `true` \| `false` |
+| `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` | `30` |
+| `--upstream-header` | `ROXY_UPSTREAM_HEADER` | розділені переносами рядків, див. нижче |
+| `--pool-size` | `ROXY_POOL_SIZE` | `16` |
+| `--log-format` | `ROXY_LOG_FORMAT` | `pretty` \| `json` |
+
+#### Кілька значень upstream-header
+
+`ROXY_UPSTREAM_HEADER` приймає кілька рядків заголовків, розділених символами переносу рядка. Це природно відображається на блочний скаляр Kubernetes YAML:
+
+```yaml
+env:
+  - name: ROXY_UPSTREAM_HEADER
+    value: |-
+      Authorization: Bearer xyz
+      X-Trace-Id: abc
+```
+
+З локального шелу використовуйте лапки `$'...'`, щоб `\n` стало справжнім переносом рядка:
+
+```bash
+ROXY_UPSTREAM_HEADER=$'Authorization: Bearer xyz\nX-Trace-Id: abc' \
+  roxy --upstream https://api.example.com/mcp
+```
+
+Початкові та завершальні порожні рядки відкидаються при запуску, тому особливості блочного скаляра YAML `|-` не породжують некоректних заголовків. Якщо `--upstream-header` переданий у командному рядку, `ROXY_UPSTREAM_HEADER` ігнорується повністю — злиття двох джерел немає.
+
+#### Булеві значення
+
+`ROXY_UPSTREAM_INSECURE` приймає лише **точні рядки в нижньому регістрі** `true` або `false`. Числові форми (`1`, `0`) та інші варіанти написання (`TRUE`, `True`, `YES`, `on`) відхиляються парсером clap (`SetTrue + env`) і призводять до помилки при запуску. Прапорець CLI `--upstream-insecure` (без значення) як і раніше працює і означає `true`.
+
+#### `RUST_LOG`
+
+roxy підтримує стандартну змінну середовища `RUST_LOG`, яка зчитується при запуску через `tracing_subscriber::EnvFilter`; вона не пов'язана зі змінними `ROXY_*` вище і залишається незмінною.
 
 ## Написання upstream-обробника
 

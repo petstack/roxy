@@ -25,6 +25,7 @@ roxy は、MCP クライアント (Claude Desktop、Cursor、Zed など) を、*
   - [インストールの確認](#インストールの確認)
 - [クイックスタート](#クイックスタート)
 - [CLI リファレンス](#cli-リファレンス)
+  - [環境変数](#環境変数)
 - [upstream ハンドラーの書き方](#upstream-ハンドラーの書き方)
 - [upstream プロトコルリファレンス](#upstream-プロトコルリファレンス)
   - [リクエストタイプ](#リクエストタイプ)
@@ -237,6 +238,51 @@ roxy --transport http --port 8080 \
      --upstream 127.0.0.1:9000 \
      --upstream-entrypoint /srv/app/handler.php
 ```
+
+### 環境変数
+
+すべての CLI フラグは、対応する `ROXY_*` 環境変数をオプションのフォールバックとして受け付けます。解決順序は **CLI > env > default** です: コマンドラインで指定したフラグは常に優先され、環境変数はフラグがない場合のみ参照され、組み込みのデフォルト値はどちらも存在しない場合にのみ使用されます。
+
+| フラグ | Env variable | 例 |
+|---|---|---|
+| `--transport` | `ROXY_TRANSPORT` | `stdio` \| `http` |
+| `--port` | `ROXY_PORT` | `8080` |
+| `--upstream` | `ROXY_UPSTREAM` | `http://localhost:8000/handler` |
+| `--upstream-entrypoint` | `ROXY_UPSTREAM_ENTRYPOINT` | `/srv/handler.php` |
+| `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `true` \| `false` |
+| `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` | `30` |
+| `--upstream-header` | `ROXY_UPSTREAM_HEADER` | 改行区切り、下記参照 |
+| `--pool-size` | `ROXY_POOL_SIZE` | `16` |
+| `--log-format` | `ROXY_LOG_FORMAT` | `pretty` \| `json` |
+
+#### 複数の upstream-header 値
+
+`ROXY_UPSTREAM_HEADER` は、リテラルの改行で区切られた複数のヘッダー行を受け付けます。これは Kubernetes YAML のブロックスカラーに自然にマッピングできます:
+
+```yaml
+env:
+  - name: ROXY_UPSTREAM_HEADER
+    value: |-
+      Authorization: Bearer xyz
+      X-Trace-Id: abc
+```
+
+ローカルシェルからは、`\n` を実際の改行にするために `$'...'` クォートを使用してください:
+
+```bash
+ROXY_UPSTREAM_HEADER=$'Authorization: Bearer xyz\nX-Trace-Id: abc' \
+  roxy --upstream https://api.example.com/mcp
+```
+
+先頭と末尾の空行は起動時に破棄されるため、YAML の `|-` ブロックスカラーの特性によって不正なヘッダーが生成されることはありません。CLI で `--upstream-header` が指定された場合、`ROXY_UPSTREAM_HEADER` は完全に無視されます — 2 つのソースがマージされることはありません。
+
+#### ブール値
+
+`ROXY_UPSTREAM_INSECURE` は**完全に小文字の文字列** `true` または `false` のみを受け付けます。数値形式 (`1`、`0`) や他の大文字小文字のバリアント (`TRUE`、`True`、`YES`、`on`) は clap の `SetTrue + env` パーサーによって拒否され、起動時にエラーになります。CLI フラグ `--upstream-insecure` (値なし) は従来通り動作し、単に `true` を意味します。
+
+#### `RUST_LOG`
+
+roxy は標準の `RUST_LOG` 環境変数を尊重します。これは起動時に `tracing_subscriber::EnvFilter` によって読み取られます。上記の `ROXY_*` 変数とは独立しており、変更はありません。
 
 ## upstream ハンドラーの書き方
 
