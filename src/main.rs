@@ -8,7 +8,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tracing::{info, warn};
 
-use roxy::config::{Config, LogFormat, Transport, UpstreamKind};
+use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_header_list};
 use roxy::executor::UpstreamExecutor;
 use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
@@ -28,8 +28,13 @@ fn init_logging(format: &LogFormat) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::parse();
+    let mut config = Config::parse();
     init_logging(&config.log_format);
+
+    // Without this, a blank line at the start/end of ROXY_UPSTREAM_HEADER
+    // (e.g. from a Kubernetes YAML `|-` block scalar) would reach
+    // parse_header() as an empty string and fail with "invalid header format".
+    config.upstream_header = normalize_header_list(std::mem::take(&mut config.upstream_header));
 
     info!("roxy starting");
     info!("transport: {:?}", config.transport);
