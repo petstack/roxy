@@ -1,7 +1,6 @@
-use rmcp::{
-    ServerHandler,
-    model::*,
-};
+use std::sync::Arc;
+
+use rmcp::{ServerHandler, model::*};
 use tracing::{error, info, warn};
 
 use crate::executor::UpstreamExecutor;
@@ -11,13 +10,13 @@ type McpError = rmcp::ErrorData;
 
 pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
-    tools: Vec<Tool>,
-    resources: Vec<Resource>,
-    prompts: Vec<Prompt>,
+    capabilities: Arc<DiscoverResult>,
 }
 
-/// Pre-discovered capabilities, shareable across server instances.
-#[derive(Clone)]
+/// Pre-discovered capabilities, shared across all server instances spawned
+/// by the HTTP transport (one per MCP session). Stored behind an `Arc` so
+/// session creation is O(1) instead of cloning the full tool/resource/prompt
+/// definitions per session.
 pub struct DiscoverResult {
     pub tools: Vec<Tool>,
     pub resources: Vec<Resource>,
@@ -29,17 +28,15 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
     pub async fn new(executor: E) -> anyhow::Result<Self> {
         info!("discovering capabilities from PHP...");
         let discover = Self::discover_from(&executor).await?;
-        Ok(Self::from_cached(executor, discover))
+        Ok(Self::from_cached(executor, Arc::new(discover)))
     }
 
     /// Create server from pre-discovered capabilities (synchronous).
     /// Used by the HTTP transport factory closure which cannot be async.
-    pub fn from_cached(executor: E, discover: DiscoverResult) -> Self {
+    pub fn from_cached(executor: E, capabilities: Arc<DiscoverResult>) -> Self {
         Self {
             executor,
-            tools: discover.tools,
-            resources: discover.resources,
-            prompts: discover.prompts,
+            capabilities,
         }
     }
 
@@ -179,7 +176,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: self.tools.clone(),
+            tools: self.capabilities.tools.clone(),
             next_cursor: None,
             meta: None,
         })
@@ -237,14 +234,11 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                     return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
                 }
                 UpstreamCallResult::Elicit(elicit) => {
-                    let schema: ElicitationSchema =
-                        serde_json::from_value(elicit.schema.clone()).map_err(|e| {
-                            error!("invalid elicitation schema from PHP: {e}");
-                            McpError::internal_error(
-                                format!("invalid elicitation schema: {e}"),
-                                None,
-                            )
-                        })?;
+                    let schema: ElicitationSchema = serde_json::from_value(elicit.schema.clone())
+                        .map_err(|e| {
+                        error!("invalid elicitation schema from PHP: {e}");
+                        McpError::internal_error(format!("invalid elicitation schema: {e}"), None)
+                    })?;
 
                     let params = CreateElicitationRequestParams::FormElicitationParams {
                         meta: None,
@@ -252,11 +246,8 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                         requested_schema: schema,
                     };
 
-                    let elicit_result = context
-                        .peer
-                        .create_elicitation(params)
-                        .await
-                        .map_err(|e| {
+                    let elicit_result =
+                        context.peer.create_elicitation(params).await.map_err(|e| {
                             error!("elicitation request failed: {e}");
                             McpError::internal_error(format!("elicitation failed: {e}"), None)
                         })?;
@@ -288,11 +279,15 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                                 request: cancel_request,
                             };
                             if let Err(e) = self.executor.execute(&cancel_envelope).await {
-                                warn!("failed to notify upstream about elicitation cancellation: {e}");
+                                warn!(
+                                    "failed to notify upstream about elicitation cancellation: {e}"
+                                );
                             }
 
                             let msg = match action {
-                                ElicitationAction::Decline => "User declined to provide information",
+                                ElicitationAction::Decline => {
+                                    "User declined to provide information"
+                                }
                                 ElicitationAction::Cancel => "User cancelled the operation",
                                 _ => unreachable!(),
                             };
@@ -310,7 +305,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
-            resources: self.resources.clone(),
+            resources: self.capabilities.resources.clone(),
             next_cursor: None,
             meta: None,
         })
@@ -325,9 +320,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 
         let session_id = extract_session_id(&context);
         let request_id = uuid::Uuid::new_v4().to_string();
-        let upstream_request = UpstreamRequest::ReadResource {
-            uri: &request.uri,
-        };
+        let upstream_request = UpstreamRequest::ReadResource { uri: &request.uri };
         let envelope = UpstreamEnvelope {
             session_id: session_id.as_deref(),
             request_id: &request_id,
@@ -348,17 +341,21 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                         UpstreamContent::Text { text } => {
                             ResourceContents::text(text, request.uri.clone())
                         }
-                        UpstreamContent::ResourceLink { .. } => {
-                            ResourceContents::text("[resource link]".to_string(), request.uri.clone())
-                        }
+                        UpstreamContent::ResourceLink { .. } => ResourceContents::text(
+                            "[resource link]".to_string(),
+                            request.uri.clone(),
+                        ),
                     })
                     .collect();
                 Ok(ReadResourceResult::new(contents))
             }
-            UpstreamCallResult::Error(e) => Err(McpError::resource_not_found(e.error.message, None)),
-            UpstreamCallResult::Elicit(_) => {
-                Err(McpError::internal_error("elicitation not supported in read_resource", None))
+            UpstreamCallResult::Error(e) => {
+                Err(McpError::resource_not_found(e.error.message, None))
             }
+            UpstreamCallResult::Elicit(_) => Err(McpError::internal_error(
+                "elicitation not supported in read_resource",
+                None,
+            )),
         }
     }
 
@@ -368,7 +365,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         Ok(ListPromptsResult {
-            prompts: self.prompts.clone(),
+            prompts: self.capabilities.prompts.clone(),
             next_cursor: None,
             meta: None,
         })
@@ -434,9 +431,10 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                 Ok(GetPromptResult::new(messages))
             }
             UpstreamCallResult::Error(e) => Err(McpError::invalid_params(e.error.message, None)),
-            UpstreamCallResult::Elicit(_) => {
-                Err(McpError::internal_error("elicitation not supported in get_prompt", None))
-            }
+            UpstreamCallResult::Elicit(_) => Err(McpError::internal_error(
+                "elicitation not supported in get_prompt",
+                None,
+            )),
         }
     }
 }

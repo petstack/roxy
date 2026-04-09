@@ -9,8 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, StreamableHttpServerConfig,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use tracing::{info, warn};
 
@@ -21,11 +20,10 @@ use executor::http::HttpExecutor;
 use server::RoxyServer;
 
 fn init_logging(format: &LogFormat) {
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        );
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
 
     match format {
         LogFormat::Pretty => subscriber.pretty().init(),
@@ -113,9 +111,11 @@ async fn run_http<E: UpstreamExecutor + 'static>(
     let addr = format!("127.0.0.1:{port}");
     info!("starting HTTP/SSE transport on {addr}");
 
-    let discover_result = RoxyServer::discover_from(&*executor)
-        .await
-        .context("failed to discover upstream capabilities")?;
+    let discover_result = Arc::new(
+        RoxyServer::discover_from(&*executor)
+            .await
+            .context("failed to discover upstream capabilities")?,
+    );
 
     let ct = tokio_util::sync::CancellationToken::new();
 
@@ -123,7 +123,7 @@ async fn run_http<E: UpstreamExecutor + 'static>(
         move || {
             Ok(RoxyServer::from_cached(
                 executor.clone(),
-                discover_result.clone(),
+                Arc::clone(&discover_result),
             ))
         },
         Arc::new(LocalSessionManager::default()),
