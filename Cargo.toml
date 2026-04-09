@@ -20,7 +20,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tokio-util = { version = "0.7", features = ["compat"] }
 deadpool = { version = "0.12", features = ["managed"] }
 axum = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -29,6 +29,7 @@ anyhow = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+temp-env = "0.3"
 
 [[bench]]
 name = "parse"
