@@ -9,9 +9,34 @@ use crate::protocol::{
 
 use super::{ExecuteContext, UpstreamExecutor};
 
+/// Merge the static `--upstream-header` set with the per-request
+/// forward-header set. Forward headers **replace** static headers on
+/// name collisions: the client's per-request identity is more specific
+/// than roxy's default service identity.
+///
+/// `reqwest::header::HeaderMap` is a re-export of `http::HeaderMap`
+/// (same type underneath), so the argument types are interchangeable —
+/// the differentiated names here make the cross-crate boundary explicit.
+fn merge_forward_headers(
+    static_headers: &reqwest::header::HeaderMap,
+    forward: Option<&http::HeaderMap>,
+) -> reqwest::header::HeaderMap {
+    let mut out = static_headers.clone();
+    if let Some(extra) = forward {
+        for (name, value) in extra {
+            // `insert` removes every existing entry for this name and
+            // replaces it with the new value. `append` would keep the
+            // static entry, which is the wrong semantic here.
+            out.insert(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
 pub struct HttpExecutor {
     client: Client,
     url: String,
+    static_headers: reqwest::header::HeaderMap,
 }
 
 impl HttpExecutor {
@@ -21,29 +46,34 @@ impl HttpExecutor {
         insecure: bool,
         raw_headers: &[String],
     ) -> anyhow::Result<Self> {
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        default_headers.insert(
+        let mut client_default_headers = reqwest::header::HeaderMap::new();
+        client_default_headers.insert(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
         );
 
+        let mut static_headers = reqwest::header::HeaderMap::new();
         for raw in raw_headers {
             let (name, value) = parse_header(raw)?;
             let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                 .context(format!("invalid header name: {name}"))?;
             let header_value = reqwest::header::HeaderValue::from_str(&value)
                 .context(format!("invalid header value for {name}"))?;
-            default_headers.insert(header_name, header_value);
+            static_headers.insert(header_name, header_value);
         }
 
         let client = Client::builder()
-            .default_headers(default_headers)
+            .default_headers(client_default_headers)
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .danger_accept_invalid_certs(insecure)
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self { client, url })
+        Ok(Self {
+            client,
+            url,
+            static_headers,
+        })
     }
 }
 
@@ -51,14 +81,17 @@ impl UpstreamExecutor for HttpExecutor {
     async fn execute(
         &self,
         request: &UpstreamEnvelope<'_>,
-        _ctx: ExecuteContext<'_>,
+        ctx: ExecuteContext<'_>,
     ) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
         debug!("sending HTTP request to {}", self.url);
 
+        let headers = merge_forward_headers(&self.static_headers, ctx.forward_headers);
+
         let response = self
             .client
             .post(&self.url)
+            .headers(headers)
             .body(body)
             .send()
             .await
@@ -78,6 +111,7 @@ impl UpstreamExecutor for HttpExecutor {
     }
 
     async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
+        // Startup handshake — no incoming client, static headers only.
         let request_id = uuid::Uuid::new_v4().to_string();
         let envelope = UpstreamEnvelope {
             session_id: None,
@@ -91,6 +125,7 @@ impl UpstreamExecutor for HttpExecutor {
         let response = self
             .client
             .post(&self.url)
+            .headers(self.static_headers.clone())
             .body(body)
             .send()
             .await
@@ -157,5 +192,71 @@ mod tests {
             &["no-colon-here".to_string()],
         );
         assert!(executor.is_err());
+    }
+
+    #[test]
+    fn merge_forward_headers_returns_static_when_forward_is_none() {
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut static_headers = HeaderMap::new();
+        static_headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer static"),
+        );
+        static_headers.insert(
+            HeaderName::from_static("x-service"),
+            HeaderValue::from_static("roxy"),
+        );
+
+        let merged = merge_forward_headers(&static_headers, None);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged.get("authorization").unwrap(), "Bearer static");
+        assert_eq!(merged.get("x-service").unwrap(), "roxy");
+    }
+
+    #[test]
+    fn merge_forward_headers_adds_forward_headers_without_collision() {
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut static_headers = HeaderMap::new();
+        static_headers.insert(
+            HeaderName::from_static("x-service"),
+            HeaderValue::from_static("roxy"),
+        );
+
+        let mut forward = HeaderMap::new();
+        forward.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer client"),
+        );
+
+        let merged = merge_forward_headers(&static_headers, Some(&forward));
+
+        assert_eq!(merged.get("x-service").unwrap(), "roxy");
+        assert_eq!(merged.get("authorization").unwrap(), "Bearer client");
+    }
+
+    #[test]
+    fn merge_forward_headers_forward_overrides_static_on_collision() {
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut static_headers = HeaderMap::new();
+        static_headers.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer static"),
+        );
+
+        let mut forward = HeaderMap::new();
+        forward.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer client"),
+        );
+
+        let merged = merge_forward_headers(&static_headers, Some(&forward));
+
+        // Exactly one Authorization header, and it's the client's.
+        assert_eq!(merged.get_all("authorization").iter().count(), 1);
+        assert_eq!(merged.get("authorization").unwrap(), "Bearer client");
     }
 }
