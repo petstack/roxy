@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rmcp::{ServerHandler, model::*};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -19,41 +17,21 @@ pub fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
 
 pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
-    capabilities: Arc<DiscoverResult>,
-}
-
-/// Pre-discovered capabilities, shared across all server instances spawned
-/// by the HTTP transport (one per MCP session). Stored behind an `Arc` so
-/// session creation is O(1) instead of cloning the full tool/resource/prompt
-/// definitions per session.
-pub struct DiscoverResult {
-    pub tools: Vec<Tool>,
-    pub resources: Vec<Resource>,
-    pub prompts: Vec<Prompt>,
 }
 
 impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
-    /// Create server and discover capabilities from PHP.
-    pub async fn new(executor: E) -> anyhow::Result<Self> {
-        info!("discovering capabilities from PHP...");
-        let discover = Self::discover_from(&executor).await?;
-        Ok(Self::from_cached(executor, Arc::new(discover)))
+    pub fn new(executor: E) -> Self {
+        Self { executor }
     }
 
-    /// Create server from pre-discovered capabilities (synchronous).
-    /// Used by the HTTP transport factory closure which cannot be async.
-    pub fn from_cached(executor: E, capabilities: Arc<DiscoverResult>) -> Self {
-        Self {
-            executor,
-            capabilities,
-        }
-    }
+    /// Discover capabilities from the upstream backend and convert to MCP types.
+    async fn discover(&self) -> Result<(Vec<Tool>, Vec<Resource>, Vec<Prompt>), McpError> {
+        let discover = self.executor.discover().await.map_err(|e| {
+            error!("upstream discover error: {e}");
+            McpError::internal_error(format!("upstream discover error: {e}"), None)
+        })?;
 
-    /// Discover capabilities from the PHP backend and convert to MCP types.
-    pub async fn discover_from(executor: &E) -> anyhow::Result<DiscoverResult> {
-        let discover = executor.discover().await?;
-
-        let tools: Vec<Tool> = discover
+        let tools = discover
             .tools
             .into_iter()
             .map(|t| {
@@ -69,7 +47,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        let resources: Vec<Resource> = discover
+        let resources = discover
             .resources
             .into_iter()
             .map(|r| {
@@ -87,7 +65,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        let prompts: Vec<Prompt> = discover
+        let prompts = discover
             .prompts
             .into_iter()
             .map(|p| {
@@ -118,18 +96,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        info!(
-            "discovered {} tools, {} resources, {} prompts",
-            tools.len(),
-            resources.len(),
-            prompts.len()
-        );
-
-        Ok(DiscoverResult {
-            tools,
-            resources,
-            prompts,
-        })
+        Ok((tools, resources, prompts))
     }
 }
 
@@ -238,8 +205,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let (tools, _, _) = self.discover().await?;
         Ok(ListToolsResult {
-            tools: self.capabilities.tools.clone(),
+            tools,
             next_cursor: None,
             meta: None,
         })
@@ -385,8 +353,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
+        let (_, resources, _) = self.discover().await?;
         Ok(ListResourcesResult {
-            resources: self.capabilities.resources.clone(),
+            resources,
             next_cursor: None,
             meta: None,
         })
@@ -454,8 +423,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
+        let (_, _, prompts) = self.discover().await?;
         Ok(ListPromptsResult {
-            prompts: self.capabilities.prompts.clone(),
+            prompts,
             next_cursor: None,
             meta: None,
         })

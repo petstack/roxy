@@ -14,6 +14,7 @@ use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
 use roxy::server::RoxyServer;
 
+
 fn init_logging(format: &LogFormat) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
@@ -95,7 +96,7 @@ async fn run<E: UpstreamExecutor + 'static>(
 
 async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::Result<()> {
     info!("starting stdio transport");
-    let server = RoxyServer::new(executor).await?;
+    let server = RoxyServer::new(executor);
     let service = server
         .serve(rmcp::transport::io::stdio())
         .await
@@ -111,21 +112,10 @@ async fn run_http<E: UpstreamExecutor + 'static>(
     let addr = format!("127.0.0.1:{port}");
     info!("starting HTTP/SSE transport on {addr}");
 
-    let discover_result = Arc::new(
-        RoxyServer::discover_from(&*executor)
-            .await
-            .context("failed to discover upstream capabilities")?,
-    );
-
     let ct = tokio_util::sync::CancellationToken::new();
 
     let service = StreamableHttpService::new(
-        move || {
-            Ok(RoxyServer::from_cached(
-                executor.clone(),
-                Arc::clone(&discover_result),
-            ))
-        },
+        move || Ok(RoxyServer::new(executor.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
