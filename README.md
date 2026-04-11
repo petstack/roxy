@@ -38,7 +38,7 @@ This lets you write MCP servers in **any language** — PHP, Python, Node, Go, R
 ## Features
 
 - **Multi-backend**: FastCGI (TCP or Unix socket) and HTTP(S) upstreams, auto-detected from URL format
-- **Transports**: stdio and HTTP/SSE, both supported natively via `rmcp`
+- **Transports**: stdio and Streamable HTTP, both supported natively via `rmcp`
 - **MCP 2025-06-18 features**: elicitation (multi-turn tool input), structured tool output, resource links in tool responses
 - **Connection pooling** for FastCGI (via `deadpool`)
 - **TLS via rustls** — no OpenSSL dependency, fully static musl builds
@@ -187,7 +187,7 @@ For network clients that connect over HTTP/SSE:
 
 ```bash
 roxy --transport http --port 8080 --upstream http://localhost:8000/mcp
-# Client connects to http://localhost:8080/sse
+# Client connects to http://localhost:8080/mcp
 ```
 
 ## CLI reference
@@ -566,6 +566,7 @@ MCP Client (Claude, Cursor, Zed, ...)
 ```
 src/
   main.rs             CLI, logging, transport startup, executor selection
+  lib.rs              Public library crate root (re-exports for benches and tests)
   config.rs           clap Config, UpstreamKind (auto-detect), FcgiAddress
   protocol.rs         Internal JSON types (UpstreamEnvelope, UpstreamRequest, ...)
   server.rs           RoxyServer: rmcp ServerHandler impl + discover caching
@@ -575,6 +576,8 @@ src/
     http.rs           HttpExecutor: reqwest + rustls
 examples/
   handler.php         Full example PHP handler with all features
+  echo_upstream.rs    Minimal HTTP echo backend for load testing
+  bench_client.rs     End-to-end load harness for profiling
 ```
 
 ### Key design decisions

@@ -38,7 +38,7 @@ Esto te permite escribir servidores MCP en **cualquier lenguaje** — PHP, Pytho
 ## Características
 
 - **Multi-backend**: upstreams FastCGI (TCP o socket Unix) y HTTP(S), auto-detectados a partir del formato de la URL
-- **Transportes**: stdio y HTTP/SSE, ambos soportados de forma nativa vía `rmcp`
+- **Transportes**: stdio y Streamable HTTP, ambos soportados de forma nativa vía `rmcp`
 - **Funcionalidades MCP 2025-06-18**: elicitation (entrada multi-turno), salida estructurada de herramientas, enlaces a recursos en respuestas
 - **Pooling de conexiones** para FastCGI (vía `deadpool`)
 - **TLS vía rustls** — sin dependencia de OpenSSL, builds musl totalmente estáticos
@@ -183,11 +183,11 @@ Para Claude Desktop o cualquier cliente que arranque servidores MCP como subproc
 }
 ```
 
-Para clientes de red que se conectan por HTTP/SSE:
+Para clientes de red que se conectan por Streamable HTTP:
 
 ```bash
 roxy --transport http --port 8080 --upstream http://localhost:8000/mcp
-# El cliente se conecta a http://localhost:8080/sse
+# El cliente se conecta a http://localhost:8080/mcp
 ```
 
 ## Referencia del CLI
@@ -536,7 +536,7 @@ Cualquier tipo de petición puede devolver un error en lugar de éxito:
 ```
 Cliente MCP (Claude, Cursor, Zed, ...)
        │
-       │ JSON-RPC sobre stdio o HTTP/SSE
+       │ JSON-RPC sobre stdio o Streamable HTTP
        ▼
 ┌──────────────┐
 │    rmcp      │  Protocolo MCP, transporte, sesiones
@@ -567,6 +567,7 @@ Cliente MCP (Claude, Cursor, Zed, ...)
 ```
 src/
   main.rs             CLI, logging, arranque del transporte, selección del executor
+  lib.rs              Raíz del crate de biblioteca (reexportaciones para benchmarks y tests)
   config.rs           Config clap, UpstreamKind (auto-detección), FcgiAddress
   protocol.rs         Tipos JSON internos (UpstreamEnvelope, UpstreamRequest, ...)
   server.rs           RoxyServer: implementación de rmcp ServerHandler + caché de discover
@@ -576,6 +577,8 @@ src/
     http.rs           HttpExecutor: reqwest + rustls
 examples/
   handler.php         Handler PHP de ejemplo con todas las funcionalidades
+  echo_upstream.rs    Backend HTTP echo mínimo para pruebas de carga
+  bench_client.rs     Cliente de carga end-to-end para profiling
 ```
 
 ### Decisiones clave de diseño

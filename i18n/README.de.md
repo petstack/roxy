@@ -38,7 +38,7 @@ So kannst du MCP-Server in **jeder Sprache** schreiben — PHP, Python, Node, Go
 ## Features
 
 - **Multi-Backend**: FastCGI (TCP oder Unix-Socket) und HTTP(S)-Upstreams, automatische Erkennung aus dem URL-Format
-- **Transporte**: stdio und HTTP/SSE, beides nativ über `rmcp`
+- **Transporte**: stdio und Streamable HTTP, beides nativ über `rmcp`
 - **MCP-2025-06-18-Features**: Elicitation (mehrstufige Tool-Eingabe), strukturiertes Tool-Output, Resource-Links in Tool-Antworten
 - **Connection-Pooling** für FastCGI (via `deadpool`)
 - **TLS über rustls** — keine OpenSSL-Abhängigkeit, vollständig statische musl-Builds
@@ -183,11 +183,11 @@ Für Claude Desktop oder jeden Client, der MCP-Server als Subprocess startet (st
 }
 ```
 
-Für Netzwerk-Clients, die über HTTP/SSE verbinden:
+Für Netzwerk-Clients, die über Streamable HTTP verbinden:
 
 ```bash
 roxy --transport http --port 8080 --upstream http://localhost:8000/mcp
-# Client verbindet sich mit http://localhost:8080/sse
+# Client verbindet sich mit http://localhost:8080/mcp
 ```
 
 ## CLI-Referenz
@@ -536,7 +536,7 @@ Jeder Request-Typ kann statt eines Erfolges einen Fehler zurückgeben:
 ```
 MCP-Client (Claude, Cursor, Zed, ...)
        │
-       │ JSON-RPC über stdio oder HTTP/SSE
+       │ JSON-RPC über stdio oder Streamable HTTP
        ▼
 ┌──────────────┐
 │    rmcp      │  MCP-Protokoll, Transport, Sessions
@@ -567,6 +567,7 @@ MCP-Client (Claude, Cursor, Zed, ...)
 ```
 src/
   main.rs             CLI, Logging, Transport-Start, Executor-Auswahl
+  lib.rs              Library-Crate-Root (Re-Exports für Benchmarks und Tests)
   config.rs           clap Config, UpstreamKind (Auto-Erkennung), FcgiAddress
   protocol.rs         Interne JSON-Typen (UpstreamEnvelope, UpstreamRequest, ...)
   server.rs           RoxyServer: rmcp-ServerHandler-Implementierung + Discover-Cache
@@ -576,6 +577,8 @@ src/
     http.rs           HttpExecutor: reqwest + rustls
 examples/
   handler.php         Vollständiges PHP-Handler-Beispiel mit allen Features
+  echo_upstream.rs    Minimales HTTP-Echo-Backend für Lasttests
+  bench_client.rs     End-to-End-Lastclient für Profiling
 ```
 
 ### Wichtige Design-Entscheidungen

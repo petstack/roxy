@@ -38,7 +38,7 @@ Pozwala to pisać serwery MCP w **dowolnym języku** — PHP, Python, Node, Go, 
 ## Funkcje
 
 - **Wiele backendów**: upstreamy FastCGI (TCP lub Unix socket) oraz HTTP(S), automatycznie wykrywane na podstawie formatu URL
-- **Transporty**: stdio i HTTP/SSE, oba obsługiwane natywnie przez `rmcp`
+- **Transporty**: stdio i Streamable HTTP, oba obsługiwane natywnie przez `rmcp`
 - **Funkcje MCP 2025-06-18**: elicitation (wieloetapowe wprowadzanie danych), strukturalne wyjście narzędzi, linki do zasobów w odpowiedziach
 - **Pula połączeń** dla FastCGI (przez `deadpool`)
 - **TLS przez rustls** — bez zależności od OpenSSL, w pełni statyczne buildy musl
@@ -183,11 +183,11 @@ Dla Claude Desktop lub dowolnego klienta uruchamiającego serwery MCP jako podpr
 }
 ```
 
-Dla klientów sieciowych łączących się przez HTTP/SSE:
+Dla klientów sieciowych łączących się przez Streamable HTTP:
 
 ```bash
 roxy --transport http --port 8080 --upstream http://localhost:8000/mcp
-# Klient łączy się z http://localhost:8080/sse
+# Klient łączy się z http://localhost:8080/mcp
 ```
 
 ## Referencja CLI
@@ -536,7 +536,7 @@ Dowolny typ żądania może zwrócić błąd zamiast sukcesu:
 ```
 Klient MCP (Claude, Cursor, Zed, ...)
        │
-       │ JSON-RPC przez stdio lub HTTP/SSE
+       │ JSON-RPC przez stdio lub Streamable HTTP
        ▼
 ┌──────────────┐
 │    rmcp      │  Protokół MCP, transport, sesje
@@ -566,6 +566,7 @@ Klient MCP (Claude, Cursor, Zed, ...)
 ```
 src/
   main.rs             CLI, logowanie, start transportu, wybór executora
+  lib.rs              Korzeń crate'a bibliotecznego (reeksporty dla benchmarków i testów)
   config.rs           clap Config, UpstreamKind (auto-wykrywanie), FcgiAddress
   protocol.rs         Wewnętrzne typy JSON (UpstreamEnvelope, UpstreamRequest, ...)
   server.rs           RoxyServer: implementacja rmcp ServerHandler + cache discover
@@ -575,6 +576,8 @@ src/
     http.rs           HttpExecutor: reqwest + rustls
 examples/
   handler.php         Pełny przykład handlera PHP ze wszystkimi funkcjami
+  echo_upstream.rs    Minimalny backend HTTP echo do testów obciążeniowych
+  bench_client.rs     Klient obciążeniowy end-to-end do profilowania
 ```
 
 ### Kluczowe decyzje projektowe
