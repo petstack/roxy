@@ -2,7 +2,7 @@
 name = "roxy"
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0-only"
+license = "Apache-2.0"
 description = "High-performance MCP (Model Context Protocol) proxy server. Bridges MCP clients to FastCGI or HTTP backends."
 homepage = "https://github.com/petstack/roxy"
 repository = "https://github.com/petstack/roxy"

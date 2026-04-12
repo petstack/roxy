@@ -629,4 +629,4 @@ cargo run -- \
 
 ## 许可证
 
-[AGPL-3.0-only](../LICENSE)。如果你将修改后的 roxy 版本作为网络服务运行,你必须向该服务的用户提供你的修改内容。
+[Apache-2.0](../LICENSE).

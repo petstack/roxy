@@ -629,4 +629,4 @@ Konfiguracja tapa — patrz [`packaging/homebrew/README.md`](../packaging/homebr
 
 ## Licencja
 
-[AGPL-3.0-only](../LICENSE). Jeśli uruchamiasz zmodyfikowaną wersję roxy jako usługę sieciową, musisz udostępnić swoje modyfikacje użytkownikom tej usługi.
+[Apache-2.0](../LICENSE).

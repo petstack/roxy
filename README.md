@@ -629,4 +629,4 @@ See [`packaging/homebrew/README.md`](packaging/homebrew/README.md) for tap setup
 
 ## License
 
-[AGPL-3.0-only](LICENSE). If you run a modified version of roxy as a network service, you must make your modifications available to users of that service.
+[Apache-2.0](LICENSE).
