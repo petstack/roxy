@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Context;
 use deadpool::managed;
 use fastcgi_client::{Client, Params, Request, conn::KeepAlive, io};
@@ -156,6 +158,11 @@ pub struct FastCgiExecutor {
     script_filename: String,
     script_name: String,
     request_uri: String,
+    /// Maximum time to wait for a free connection from the pool.
+    /// Without this, `deadpool::managed::Pool::get` blocks forever
+    /// when every slot is busy, turning a saturated pool into an
+    /// indefinite hang on the client side.
+    pool_wait_timeout: Duration,
 }
 
 impl FastCgiExecutor {
@@ -163,6 +170,7 @@ impl FastCgiExecutor {
         address: &FcgiAddress,
         script_filename: String,
         pool_size: usize,
+        pool_wait_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let script_name = derive_script_name(&script_filename);
         let request_uri = script_name.clone();
@@ -191,6 +199,7 @@ impl FastCgiExecutor {
             script_filename,
             script_name,
             request_uri,
+            pool_wait_timeout,
         })
     }
 
@@ -212,10 +221,7 @@ impl FastCgiExecutor {
 
         let response = match &self.pool {
             FcgiPool::Tcp(pool) => {
-                let mut conn = pool
-                    .get()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("pool error: {e}"))?;
+                let mut conn = acquire(pool, self.pool_wait_timeout).await?;
                 debug!("sending FastCGI request via TCP");
                 let res = conn
                     .execute(Request::new(params, io::Cursor::new(body)))
@@ -224,10 +230,7 @@ impl FastCgiExecutor {
                 detach_on_error(conn, res)?
             }
             FcgiPool::Unix(pool) => {
-                let mut conn = pool
-                    .get()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("pool error: {e}"))?;
+                let mut conn = acquire(pool, self.pool_wait_timeout).await?;
                 debug!("sending FastCGI request via Unix socket");
                 let res = conn
                     .execute(Request::new(params, io::Cursor::new(body)))
@@ -258,6 +261,29 @@ pub fn body_start_offset(raw: &[u8]) -> usize {
     match raw.windows(SEP.len()).position(|w| w == SEP) {
         Some(pos) => pos + SEP.len(),
         None => 0,
+    }
+}
+
+/// Acquire a connection from `pool` with a hard wait timeout. `deadpool`'s
+/// default `Pool::get` has no wait limit, so a saturated pool turns into an
+/// indefinite client-side hang. Wrapping with `tokio::time::timeout` caps
+/// the wait and surfaces the exhaustion as an error that propagates back to
+/// the MCP client instead of silently stalling.
+async fn acquire<M>(
+    pool: &managed::Pool<M>,
+    wait: Duration,
+) -> anyhow::Result<managed::Object<M>>
+where
+    M: managed::Manager,
+    M::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(wait, pool.get()).await {
+        Ok(Ok(obj)) => Ok(obj),
+        Ok(Err(e)) => Err(anyhow::anyhow!("pool error: {e}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "FastCGI pool exhausted: no free connection within {:?}",
+            wait
+        )),
     }
 }
 
@@ -385,7 +411,8 @@ mod tests {
     fn executor_new_derives_cgi_fields_from_entrypoint() {
         let addr = FcgiAddress::Tcp("127.0.0.1:0".to_string());
         let entrypoint = "/var/www/bookings/api.php".to_string();
-        let ex = FastCgiExecutor::new(&addr, entrypoint.clone(), 1).unwrap();
+        let ex =
+            FastCgiExecutor::new(&addr, entrypoint.clone(), 1, Duration::from_secs(30)).unwrap();
         assert_eq!(
             ex.script_filename, entrypoint,
             "SCRIPT_FILENAME must be byte-for-byte"
@@ -531,6 +558,54 @@ mod tests {
         assert_eq!(
             params.get("HTTP_X_FORWARDED_FOR").unwrap().as_ref(),
             "10.0.0.1, 10.0.0.2"
+        );
+    }
+
+    /// A saturated pool must surface as a timeout error, not hang forever.
+    /// Uses a 1-slot pool whose single connection is held for the whole
+    /// test; the second acquire must fail within the configured wait
+    /// budget. Guards against regressing to the unbounded `pool.get()`
+    /// call that made roxy hang when every FastCGI slot was busy.
+    #[tokio::test]
+    async fn acquire_times_out_when_pool_saturated() {
+        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+
+        #[derive(Debug)]
+        struct MockManager;
+        impl Manager for MockManager {
+            type Type = ();
+            type Error = std::io::Error;
+
+            async fn create(&self) -> Result<(), std::io::Error> {
+                Ok(())
+            }
+            async fn recycle(
+                &self,
+                _obj: &mut (),
+                _metrics: &Metrics,
+            ) -> RecycleResult<std::io::Error> {
+                Ok(())
+            }
+        }
+
+        let pool: Pool<MockManager> = Pool::builder(MockManager).max_size(1).build().unwrap();
+
+        // Hold the only slot for the entire test.
+        let _held = pool.get().await.unwrap();
+
+        let start = std::time::Instant::now();
+        let result = acquire(&pool, Duration::from_millis(50)).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "saturated pool must return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("pool exhausted"),
+            "expected 'pool exhausted' in error, got: {err_msg}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "acquire must honor the wait budget, took {elapsed:?}"
         );
     }
 

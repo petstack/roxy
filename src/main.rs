@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
                 &address,
                 entrypoint,
                 config.pool_size,
+                std::time::Duration::from_secs(config.upstream_timeout),
             )?);
             run(executor, &config).await
         }
