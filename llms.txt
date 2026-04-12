@@ -1,0 +1,38 @@
+# roxy
+
+> High-performance MCP (Model Context Protocol) proxy server in Rust that bridges MCP clients (Claude Desktop, Cursor, Zed) to upstream handlers running as FastCGI (PHP-FPM) or HTTP(S) backends — letting you write MCP servers in any language without reimplementing JSON-RPC, transport, or capability negotiation.
+
+roxy handles everything performance-critical — `stdio` and Streamable HTTP transports, protocol parsing, FastCGI connection pooling, TLS via rustls, capability caching, header forwarding — via the official `rmcp` crate. Upstream handlers only deal with a small simplified JSON protocol: receive an `UpstreamRequest`, return an `UpstreamCallResult`. Supports MCP 2025-06-18 features including elicitation (multi-turn tool input), structured tool output, and resource links.
+
+## Docs
+
+- [README](https://github.com/petstack/roxy/blob/main/README.md): full user guide — features, installation, quick start, CLI reference, upstream protocol reference, architecture
+- [CLAUDE.md](https://github.com/petstack/roxy/blob/main/CLAUDE.md): architecture map and key file pointers for code assistants
+- [CONTRIBUTING](https://github.com/petstack/roxy/blob/main/CONTRIBUTING.md): development workflow and contribution guidelines
+- [BENCHMARKS](https://github.com/petstack/roxy/blob/main/docs/BENCHMARKS.md): performance benchmark results and methodology
+- [LICENSE](https://github.com/petstack/roxy/blob/main/LICENSE): Apache-2.0
+
+## Examples
+
+- [handler.php](https://github.com/petstack/roxy/blob/main/examples/handler.php): reference PHP upstream handler (works with PHP-FPM via FastCGI)
+- [handler.py](https://github.com/petstack/roxy/blob/main/examples/handler.py): reference Python upstream handler (HTTP backend)
+- [handler.ts](https://github.com/petstack/roxy/blob/main/examples/handler.ts): reference TypeScript/Node upstream handler (HTTP backend)
+- [echo_upstream.rs](https://github.com/petstack/roxy/blob/main/examples/echo_upstream.rs): minimal echo upstream used in tests and benchmarks
+- [bench_client.rs](https://github.com/petstack/roxy/blob/main/examples/bench_client.rs): benchmark client
+
+## Source
+
+- [src/server.rs](https://github.com/petstack/roxy/blob/main/src/server.rs): `RoxyServer<E>` — implements `rmcp::ServerHandler`, discovers upstream capabilities at startup, forwards MCP calls to the configured executor, filters hop-by-hop headers for forwarding
+- [src/executor/mod.rs](https://github.com/petstack/roxy/blob/main/src/executor/mod.rs): `UpstreamExecutor` trait with `execute()` and `discover()`
+- [src/executor/fastcgi.rs](https://github.com/petstack/roxy/blob/main/src/executor/fastcgi.rs): `FastCgiExecutor` — TCP or Unix socket, `deadpool` pooling, CGI `HTTP_*` parameter mapping
+- [src/executor/http.rs](https://github.com/petstack/roxy/blob/main/src/executor/http.rs): `HttpExecutor` — `reqwest` + rustls, custom headers, configurable timeouts
+- [src/protocol.rs](https://github.com/petstack/roxy/blob/main/src/protocol.rs): internal JSON protocol — `UpstreamRequest`, `UpstreamCallResult`, `UpstreamDiscoverResponse`, `UpstreamEnvelope`
+- [src/config.rs](https://github.com/petstack/roxy/blob/main/src/config.rs): CLI config via `clap`, `UpstreamKind` auto-detection from URL
+- [src/main.rs](https://github.com/petstack/roxy/blob/main/src/main.rs): entry point — parses CLI, selects executor, starts stdio or HTTP transport
+
+## Optional
+
+- [Russian README](https://github.com/petstack/roxy/blob/main/i18n/README.ru.md): translated overview (also available: uk, be, pl, de, fr, es, zh-CN, ja under `i18n/`)
+- [Cargo.toml](https://github.com/petstack/roxy/blob/main/Cargo.toml): Rust edition 2024, key deps: `rmcp` 1.3, `fastcgi-client` 0.11, `reqwest` 0.12, `deadpool`, `tokio`, `axum`
+- [install.sh](https://github.com/petstack/roxy/blob/main/install.sh): prebuilt-binary installer for any Unix
+- [packaging/](https://github.com/petstack/roxy/tree/main/packaging): Homebrew, .deb, .rpm, and static tarball packaging
