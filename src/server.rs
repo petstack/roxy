@@ -119,6 +119,11 @@ fn is_dropped_header(name: &str) -> bool {
         "host",
         "content-type",
         "content-length",
+        // `Proxy` is never a legitimate request header; forwarding it to
+        // a CGI backend turns into `HTTP_PROXY` and triggers httpoxy
+        // (CVE-2016-5385), letting a client redirect the backend's
+        // outbound HTTP traffic.
+        "proxy",
     ];
     DROPPED
         .iter()
@@ -532,6 +537,15 @@ mod tests {
     #[test]
     fn is_dropped_header_drops_roxy_managed() {
         for name in ["Host", "content-type", "Content-Length"] {
+            assert!(is_dropped_header(name), "expected {name} to be dropped");
+        }
+    }
+
+    #[test]
+    fn is_dropped_header_drops_proxy_httpoxy() {
+        // CVE-2016-5385: a `Proxy` request header forwarded to a CGI
+        // backend becomes `HTTP_PROXY` and hijacks outbound traffic.
+        for name in ["proxy", "Proxy", "PROXY"] {
             assert!(is_dropped_header(name), "expected {name} to be dropped");
         }
     }
