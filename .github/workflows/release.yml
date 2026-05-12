@@ -218,10 +218,12 @@ jobs:
             echo "  ${target} -> ${sha}"
           done
 
-          # Safety check: no placeholders should remain
-          if grep -q "REPLACE_WITH" tap/Formula/roxy.rb; then
+          # Safety check: no placeholders should remain in sha256 lines.
+          # Scoped to `sha256 "REPLACE_WITH...` so the doc comment that
+          # mentions the placeholder name doesn't trip the check.
+          if grep -q 'sha256 "REPLACE_WITH' tap/Formula/roxy.rb; then
             echo "error: unsubstituted placeholders remain in formula:" >&2
-            grep "REPLACE_WITH" tap/Formula/roxy.rb >&2
+            grep 'sha256 "REPLACE_WITH' tap/Formula/roxy.rb >&2
             exit 1
           fi
 
