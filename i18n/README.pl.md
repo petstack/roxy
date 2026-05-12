@@ -42,7 +42,6 @@ Pozwala to pisać serwery MCP w **dowolnym języku** — PHP, Python, Node, Go, 
 - **Funkcje MCP 2025-06-18**: elicitation (wieloetapowe wprowadzanie danych), strukturalne wyjście narzędzi, linki do zasobów w odpowiedziach
 - **Pula połączeń** dla FastCGI (przez `deadpool`)
 - **TLS przez rustls** — bez zależności od OpenSSL, w pełni statyczne buildy musl
-- **Cache’owanie możliwości** — narzędzia/zasoby/prompty pobierane raz przy starcie
 - **Niestandardowe nagłówki HTTP**, konfigurowalne timeouty, przekazywanie request/session ID do upstream
 
 ## Instalacja
@@ -374,7 +373,7 @@ Każde żądanie od roxy do Twojego upstreamu to obiekt JSON z tymi wspólnymi p
 
 #### `discover`
 
-Wysyłane raz przy starcie roxy. Twój handler musi zwrócić pełny katalog obsługiwanych narzędzi, zasobów i promptów. roxy cache’uje wynik i serwuje go wszystkim klientom MCP bez ponownego odpytywania.
+Wysyłane przy każdym żądaniu klienta listy narzędzi, zasobów lub promptów. Twój handler musi zwrócić pełny katalog obsługiwanych narzędzi, zasobów i promptów. roxy nie cache’uje odpowiedzi — każde `list_*` od klienta wyzwala nowy `discover`.
 
 ```json
 // Odpowiedź
@@ -544,7 +543,7 @@ Klient MCP (Claude, Cursor, Zed, ...)
        │
        ▼
 ┌──────────────┐
-│  RoxyServer  │  trasowanie metod MCP, cache możliwości
+│  RoxyServer  │  trasowanie metod MCP, proxy do upstreamu
 └──────────────┘
        │
        │ uproszczony JSON (UpstreamEnvelope + UpstreamRequest)
@@ -569,7 +568,7 @@ src/
   lib.rs              Korzeń crate'a bibliotecznego (reeksporty dla benchmarków i testów)
   config.rs           clap Config, UpstreamKind (auto-wykrywanie), FcgiAddress
   protocol.rs         Wewnętrzne typy JSON (UpstreamEnvelope, UpstreamRequest, ...)
-  server.rs           RoxyServer: implementacja rmcp ServerHandler + cache discover
+  server.rs           RoxyServer: implementacja rmcp ServerHandler
   executor/
     mod.rs            Trait UpstreamExecutor
     fastcgi.rs        FastCgiExecutor: deadpool + fastcgi-client
@@ -584,7 +583,7 @@ examples/
 
 - **rmcp wykonuje ciężką pracę.** Oficjalny crate `rmcp` zajmuje się całą złożonością protokołu MCP (JSON-RPC, negocjacja transportu, zarządzanie sesjami). roxy implementuje tylko `ServerHandler`.
 - **Upstream jest wymienny.** Trait `UpstreamExecutor` abstrahuje komunikację z backendem. FastCGI i HTTP to obecne implementacje; dodanie nowego backendu (gRPC, stdio, WebSocket) sprowadza się do implementacji jednego traita.
-- **Możliwości są cache’owane.** roxy wywołuje `discover` raz przy starcie i przechowuje narzędzia/zasoby/prompty w pamięci. Klienci MCP otrzymują natychmiastowe odpowiedzi na `initialize` bez dotykania upstreamu.
+- **Discover jest leniwy.** roxy nie cache’uje odpowiedzi `discover`: każde `list_tools`/`list_resources`/`list_prompts` od klienta wyzwala nowe zapytanie do upstreamu, więc zmiany katalogu są widoczne bez restartu.
 - **Pula połączeń dla FastCGI.** `deadpool` utrzymuje ciepłe połączenia z PHP-FPM, unikając konfiguracji socketu przy każdym żądaniu.
 - **TLS w czystym Rust przez rustls.** Bez OpenSSL, bez bibliotek systemowych. W pełni statyczne buildy Linux, prosta kompilacja krzyżowa, przenośne binarki.
 - **Upstream pozostaje prosty.** Twój handler nigdy nie widzi JSON-RPC, ID żądań (poza jako nieprzezroczyste pole koperty), stanu sesji ani ramkowania MCP. Prosty JSON na wejściu, prosty JSON na wyjściu.

@@ -2,7 +2,7 @@
 
 > High-performance MCP (Model Context Protocol) proxy server in Rust that bridges MCP clients (Claude Desktop, Cursor, Zed) to upstream handlers running as FastCGI (PHP-FPM) or HTTP(S) backends — letting you write MCP servers in any language without reimplementing JSON-RPC, transport, or capability negotiation.
 
-roxy handles everything performance-critical — `stdio` and Streamable HTTP transports, protocol parsing, FastCGI connection pooling, TLS via rustls, capability caching, header forwarding — via the official `rmcp` crate. Upstream handlers only deal with a small simplified JSON protocol: receive an `UpstreamRequest`, return an `UpstreamCallResult`. Supports MCP 2025-06-18 features including elicitation (multi-turn tool input), structured tool output, and resource links.
+roxy handles everything performance-critical — `stdio` and Streamable HTTP transports, protocol parsing, FastCGI connection pooling, TLS via rustls, header forwarding — via the official `rmcp` crate. Upstream handlers only deal with a small simplified JSON protocol: receive an `UpstreamRequest`, return an `UpstreamCallResult`. Supports MCP 2025-06-18 features including elicitation (multi-turn tool input), structured tool output, and resource links.
 
 ## Docs
 

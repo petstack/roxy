@@ -42,7 +42,6 @@ roxy は、MCP クライアント (Claude Desktop、Cursor、Zed など) を、*
 - **MCP 2025-06-18 の機能**: elicitation (マルチターン入力)、構造化ツール出力、ツールレスポンス内のリソースリンク
 - **コネクションプーリング** (FastCGI、`deadpool` 経由)
 - **rustls による TLS** — OpenSSL 依存なし、完全に静的な musl ビルド
-- **機能のキャッシング** — tools/resources/prompts は起動時に一度だけ発見される
 - **カスタム HTTP ヘッダー**、設定可能なタイムアウト、リクエスト/セッション ID を upstream に伝搬
 
 ## インストール
@@ -374,7 +373,7 @@ roxy から upstream へのすべてのリクエストは、以下の共通の�
 
 #### `discover`
 
-roxy 起動時に一度だけ送信されます。あなたのハンドラーは、サポートするすべてのツール、リソース、プロンプトの完全なカタログを返す必要があります。roxy は結果をキャッシュし、再度問い合わせることなくすべての MCP クライアントに提供します。
+クライアントがツール、リソース、またはプロンプトのリストを要求するたびに送信されます。あなたのハンドラーは、サポートするすべてのツール、リソース、プロンプトの完全なカタログを返す必要があります。roxy は応答をキャッシュしません — クライアントの各 `list_*` 呼び出しごとに新しい `discover` が発行されます。
 
 ```json
 // レスポンス
@@ -544,7 +543,7 @@ MCP クライアント (Claude, Cursor, Zed, ...)
        │
        ▼
 ┌──────────────┐
-│  RoxyServer  │  MCP メソッドのルーティング、機能のキャッシュ
+│  RoxyServer  │  MCP メソッドのルーティング、upstream へのプロキシ
 └──────────────┘
        │
        │ 簡略化された JSON (UpstreamEnvelope + UpstreamRequest)
@@ -569,7 +568,7 @@ src/
   lib.rs              ライブラリクレートのルート (ベンチマークとテスト用の再エクスポート)
   config.rs           clap Config、UpstreamKind (自動検出)、FcgiAddress
   protocol.rs         内部 JSON 型 (UpstreamEnvelope, UpstreamRequest, ...)
-  server.rs           RoxyServer: rmcp ServerHandler 実装 + discover キャッシュ
+  server.rs           RoxyServer: rmcp ServerHandler 実装
   executor/
     mod.rs            UpstreamExecutor trait
     fastcgi.rs        FastCgiExecutor: deadpool + fastcgi-client
@@ -584,7 +583,7 @@ examples/
 
 - **rmcp が重労働を担当。** 公式の `rmcp` クレートが MCP プロトコルのすべての複雑さ (JSON-RPC、トランスポートネゴシエーション、セッション管理) を処理します。roxy は `ServerHandler` だけを実装します。
 - **upstream はプラガブル。** `UpstreamExecutor` trait がバックエンド通信を抽象化しています。FastCGI と HTTP が現在の実装で、新しいバックエンド (gRPC、stdio、WebSocket) を追加するには 1 つの trait を実装するだけです。
-- **機能はキャッシュされます。** roxy は起動時に一度 `discover` を呼び出し、tools/resources/prompts をメモリに保持します。MCP クライアントは upstream に触れることなく `initialize` に対して瞬時にレスポンスを受け取ります。
+- **Discover は遅延呼び出しです。** roxy は `discover` の応答をキャッシュしません: クライアントの `list_tools`/`list_resources`/`list_prompts` 呼び出しごとに新しい upstream リクエストが発行されるため、カタログの変更は再起動なしで反映されます。
 - **FastCGI 向けのコネクションプーリング。** `deadpool` が PHP-FPM への接続を温かく保ち、リクエストごとのソケットセットアップを回避します。
 - **rustls による純粋 Rust の TLS。** OpenSSL なし、システムライブラリなし。完全に静的な Linux ビルド、簡単なクロスコンパイル、移植可能なバイナリ。
 - **upstream はシンプルなまま。** あなたのハンドラーは JSON-RPC、リクエスト ID (エンベロープの不透明なフィールドとしてを除き)、セッション状態、MCP フレーミングを一切見ません。シンプルな JSON が入り、シンプルな JSON が出ていきます。

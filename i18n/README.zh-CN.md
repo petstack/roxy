@@ -42,7 +42,6 @@ roxy 将 MCP 客户端(Claude Desktop、Cursor、Zed 等)桥接到任何上游�
 - **MCP 2025-06-18 特性**:elicitation(多轮工具输入)、结构化工具输出、工具响应中的资源链接
 - **连接池**(FastCGI,通过 `deadpool`)
 - **通过 rustls 的 TLS** — 无 OpenSSL 依赖,完全静态的 musl 构建
-- **能力缓存** — tools/resources/prompts 在启动时一次性发现
 - **自定义 HTTP 头**、可配置的超时、向上游传递请求/会话 ID
 
 ## 安装
@@ -374,7 +373,7 @@ roxy 发给你的上游的每个请求都是带有以下公共信封字段的 JS
 
 #### `discover`
 
-在 roxy 启动时发送一次。你的处理器必须返回它支持的所有工具、资源和提示的完整目录。roxy 会缓存结果,并在不再次查询的情况下将其提供给所有 MCP 客户端。
+在客户端每次请求列出工具、资源或提示时发送。你的处理器必须返回它支持的所有工具、资源和提示的完整目录。roxy 不缓存响应——客户端每次 `list_*` 都会触发一次新的 `discover`。
 
 ```json
 // 响应
@@ -544,7 +543,7 @@ MCP 客户端 (Claude, Cursor, Zed, ...)
        │
        ▼
 ┌──────────────┐
-│  RoxyServer  │  路由 MCP 方法、缓存能力
+│  RoxyServer  │  路由 MCP 方法、转发到上游
 └──────────────┘
        │
        │ 简化的 JSON (UpstreamEnvelope + UpstreamRequest)
@@ -569,7 +568,7 @@ src/
   lib.rs              库 crate 根（为基准测试和测试重新导出）
   config.rs           clap Config、UpstreamKind（自动检测）、FcgiAddress
   protocol.rs         内部 JSON 类型 (UpstreamEnvelope, UpstreamRequest, ...)
-  server.rs           RoxyServer:rmcp ServerHandler 实现 + discover 缓存
+  server.rs           RoxyServer:rmcp ServerHandler 实现
   executor/
     mod.rs            UpstreamExecutor trait
     fastcgi.rs        FastCgiExecutor:deadpool + fastcgi-client
@@ -584,7 +583,7 @@ examples/
 
 - **rmcp 承担重任。**官方 `rmcp` crate 处理所有 MCP 协议复杂性(JSON-RPC、传输协商、会话管理)。roxy 只实现 `ServerHandler`。
 - **上游可插拔。** `UpstreamExecutor` trait 抽象了后端通信。FastCGI 和 HTTP 是当前的实现;添加新后端(gRPC、stdio、WebSocket)只需实现一个 trait。
-- **能力被缓存。** roxy 在启动时调用一次 `discover` 并将 tools/resources/prompts 保存在内存中。MCP 客户端获得对 `initialize` 的即时响应,而无需触及上游。
+- **Discover 采用懒调用。** roxy 不缓存 `discover` 响应:每次客户端的 `list_tools`/`list_resources`/`list_prompts` 都会触发一次新的上游请求,因此目录变更无需重启即可生效。
 - **FastCGI 连接池。** `deadpool` 保持与 PHP-FPM 的连接处于温暖状态,避免每次请求都设置套接字。
 - **通过 rustls 的纯 Rust TLS。**无 OpenSSL,无系统库。完全静态的 Linux 构建、简单的交叉编译、可移植的二进制文件。
 - **上游保持简单。**你的处理器永远看不到 JSON-RPC、请求 ID(除非作为不透明的信封字段)、会话状态或 MCP 封帧。简单 JSON 进,简单 JSON 出。

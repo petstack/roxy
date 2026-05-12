@@ -77,15 +77,12 @@ sequenceDiagram
     participant R as roxy
     participant B as Your Backend
 
-    Note over R,B: Startup
-    R->>B: "discover" — what tools/resources/prompts do you have?
-    B-->>R: Here's the list
-    R->>R: Caches the list
-
     Note over C,R: Client connects
     C->>R: Connect (stdio pipe or HTTP)
     C->>R: "list tools"
-    R-->>C: (from cache) Here are the tools
+    R->>B: "discover" — what tools/resources/prompts do you have?
+    B-->>R: Here's the list
+    R-->>C: Here are the tools
 
     Note over C,B: User asks AI to use a tool
     C->>R: "call_tool" name=book_flight
@@ -353,7 +350,7 @@ flowchart TB
 
 ### 10.1 `discover`
 
-Sent once when roxy starts. The response is cached and served to every MCP client without re-asking your backend.
+Sent whenever an MCP client asks roxy to list tools, resources, or prompts. roxy does not cache the response — each `list_*` call from the client triggers a fresh `discover`, so changes you make to your backend's catalogue show up on the next listing without restarting roxy.
 
 **Request**
 
@@ -893,10 +890,10 @@ Yes. Run roxy with `--transport http` and front it with whatever TLS / load-bala
 No. roxy is a stateless translator. Sessions, storage, and state all live in your backend.
 
 **What happens if my backend restarts?**
-Existing in-flight requests will fail with a connection error and be reported to the client. New requests succeed as soon as the backend is back up. roxy's capability cache (from the initial `discover`) is kept — restart roxy if you add or remove tools.
+Existing in-flight requests will fail with a connection error and be reported to the client. New requests succeed as soon as the backend is back up.
 
 **What if I change tools at runtime?**
-Restart roxy so it re-runs `discover`. The cache is not invalidated automatically.
+Nothing special is needed. roxy calls `discover` on every `list_tools`/`list_resources`/`list_prompts` request, so the client sees your new catalogue the next time it lists.
 
 **Why are some headers missing from my backend?**
 They were probably hop-by-hop headers or internally managed by roxy. See [section 11](#11-header-forwarding).

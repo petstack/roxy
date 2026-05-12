@@ -42,7 +42,6 @@ roxy з’єднує MCP-клієнтів (Claude Desktop, Cursor, Zed тощо)
 - **Можливості MCP 2025-06-18**: elicitation (багатокроковий ввід), структурований вивід інструментів, посилання на ресурси у відповідях
 - **Пулінг з’єднань** для FastCGI (через `deadpool`)
 - **TLS через rustls** — без залежності від OpenSSL, повністю статичні musl-збірки
-- **Кешування можливостей** — tools/resources/prompts опитуються один раз при старті
 - **Довільні HTTP-заголовки**, налаштовувані таймаути, передача request/session ID в upstream
 
 ## Встановлення
@@ -374,7 +373,7 @@ echo json_encode(match ($req['type']) {
 
 #### `discover`
 
-Надсилається один раз при старті roxy. Ваш обробник має повернути повний каталог підтримуваних інструментів, ресурсів і промптів. roxy кешує результат і віддає його всім MCP-клієнтам без повторних запитів.
+Надсилається при кожному запиті клієнта списку інструментів, ресурсів або промптів. Ваш обробник має повернути повний каталог підтримуваних інструментів, ресурсів і промптів. roxy не кешує відповідь — кожен `list_*` від клієнта ініціює новий `discover`.
 
 ```json
 // Відповідь
@@ -544,7 +543,7 @@ MCP-клієнт (Claude, Cursor, Zed, ...)
        │
        ▼
 ┌──────────────┐
-│  RoxyServer  │  маршрутизація MCP-методів, кеш можливостей
+│  RoxyServer  │  маршрутизація MCP-методів, проксування на upstream
 └──────────────┘
        │
        │ спрощений JSON (UpstreamEnvelope + UpstreamRequest)
@@ -570,7 +569,7 @@ src/
   lib.rs              Корінь бібліотечного крейту (реекспорти для бенчмарків і тестів)
   config.rs           clap Config, UpstreamKind (автовизначення), FcgiAddress
   protocol.rs         Внутрішні JSON-типи (UpstreamEnvelope, UpstreamRequest, ...)
-  server.rs           RoxyServer: реалізація rmcp ServerHandler + кеш discover
+  server.rs           RoxyServer: реалізація rmcp ServerHandler
   executor/
     mod.rs            Трейт UpstreamExecutor
     fastcgi.rs        FastCgiExecutor: deadpool + fastcgi-client
@@ -585,7 +584,7 @@ examples/
 
 - **rmcp робить важку роботу.** Офіційний крейт `rmcp` бере на себе всю складність MCP-протоколу (JSON-RPC, узгодження транспорту, керування сесіями). roxy реалізує лише `ServerHandler`.
 - **Upstream підключаємий.** Трейт `UpstreamExecutor` абстрагує комунікацію з бекендом. FastCGI та HTTP — поточні реалізації; додати новий бекенд (gRPC, stdio, WebSocket) = реалізувати один трейт.
-- **Можливості кешуються.** roxy викликає `discover` один раз при старті та тримає tools/resources/prompts у пам’яті. MCP-клієнти отримують миттєві відповіді на `initialize`, не чіпаючи upstream.
+- **Discover викликається ліниво.** roxy не кешує відповідь `discover`: кожен клієнтський `list_tools`/`list_resources`/`list_prompts` ініціює новий запит до upstream, тому зміни каталогу видно без перезапуску.
 - **Пулінг з’єднань для FastCGI.** `deadpool` тримає з’єднання з PHP-FPM теплими, уникаючи налаштування сокета на кожен запит.
 - **Pure-Rust TLS через rustls.** Без OpenSSL, без системних бібліотек. Повністю статичні Linux-збірки, проста крос-компіляція, переносимі бінари.
 - **Upstream лишається простим.** Ваш обробник ніколи не бачить JSON-RPC, request ID (окрім як в непрозорому полі envelope), стану сесії чи MCP framing. Простий JSON на вході, простий JSON на виході.
