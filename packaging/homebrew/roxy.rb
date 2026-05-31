@@ -15,7 +15,7 @@ class Roxy < Formula
   desc "High-performance MCP proxy server bridging MCP clients to FastCGI/HTTP backends"
   homepage "https://github.com/petstack/roxy"
   version "0.1.0"
-  license "AGPL-3.0-only"
+  license "Apache-2.0"
 
   on_macos do
     on_arm do

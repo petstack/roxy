@@ -1,6 +1,6 @@
 [package]
 name = "roxy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "High-performance MCP (Model Context Protocol) proxy server. Bridges MCP clients to FastCGI or HTTP backends."
