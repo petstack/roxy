@@ -26,6 +26,8 @@ ALL_TARGETS=(
   x86_64-apple-darwin
   x86_64-unknown-linux-musl
   aarch64-unknown-linux-musl
+  x86_64-pc-windows-msvc
+  aarch64-pc-windows-msvc
 )
 
 # ── parse args ────────────────────────────────────────────────────────
@@ -47,13 +49,18 @@ platform_to_targets() {
       all)           out+=("${ALL_TARGETS[@]}") ;;
       darwin)        out+=(aarch64-apple-darwin x86_64-apple-darwin) ;;
       linux)         out+=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl) ;;
+      windows)       out+=(x86_64-pc-windows-msvc aarch64-pc-windows-msvc) ;;
       darwin-arm64)  out+=(aarch64-apple-darwin) ;;
       darwin-x64)    out+=(x86_64-apple-darwin) ;;
       linux-arm64)   out+=(aarch64-unknown-linux-musl) ;;
       linux-x64)     out+=(x86_64-unknown-linux-musl) ;;
+      windows-arm64) out+=(aarch64-pc-windows-msvc) ;;
+      windows-x64)   out+=(x86_64-pc-windows-msvc) ;;
       *)
         echo "Unknown --platform value: $item" >&2
-        echo "Valid: all, darwin, linux, darwin-arm64, darwin-x64, linux-arm64, linux-x64" >&2
+        echo "Valid: all, darwin, linux, windows," >&2
+        echo "       darwin-arm64, darwin-x64, linux-arm64, linux-x64," >&2
+        echo "       windows-arm64, windows-x64" >&2
         exit 1
         ;;
     esac
@@ -79,16 +86,17 @@ Usage: $0 [options]
 
   --target TARGET      rust target triple (repeatable)
   --platform SPEC      shortcut, comma-separated. Values:
-                         all, darwin, linux,
+                         all, darwin, linux, windows,
                          darwin-arm64, darwin-x64,
-                         linux-arm64, linux-x64
+                         linux-arm64, linux-x64,
+                         windows-arm64, windows-x64
   --from-release TAG   download prebuilt binaries from GitHub release
   --bin PATH           use a local binary (single target, host-detected)
   --out DIR            output directory (default: target/mcpb)
   --name SLUG          override extension name slug (default: roxy)
                          affects manifest "name" and bundle filename
   --display-name STR   override extension display name
-                         (default: derived from --name or "Roxy — MCP Proxy")
+                         (default: derived from --name or "Roxy — MCP Gateway")
 USAGE
       exit 0
       ;;
@@ -107,7 +115,7 @@ VERSION="$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/
 NAME="${NAME:-roxy}"
 if [[ -z "$DISPLAY_NAME" ]]; then
   if [[ "$NAME" == "roxy" ]]; then
-    DISPLAY_NAME="Roxy — MCP Proxy"
+    DISPLAY_NAME="Roxy — MCP Gateway"
   else
     DISPLAY_NAME="$NAME"
   fi
@@ -142,22 +150,37 @@ binary_name() {
 # ── acquire binary for a target ───────────────────────────────────────
 acquire_binary() {
   local target="$1" dest="$2"
+  local bin_name
+  bin_name="$(binary_name "$target")"
 
   if [[ -n "$FROM_RELEASE" ]]; then
     local tag="$FROM_RELEASE"
-    local archive="roxy-${tag}-${target}.tar.gz"
-    local url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
-    echo "    Downloading $url"
-    local tmp
-    tmp="$(mktemp -d)"
-    curl -sSfL "$url" -o "$tmp/$archive"
-    tar -xzf "$tmp/$archive" -C "$tmp"
-    cp "$tmp"/roxy-*/roxy "$dest"
-    rm -rf "$tmp"
+    case "$target" in
+      *-windows-*)
+        # Windows releases ship a portable bare .exe alongside the .zip
+        # (release.yml "Package archive (Windows)") — grab it directly so we
+        # don't depend on an unzip tool being installed.
+        local archive="roxy-${tag}-${target}.exe"
+        local url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+        echo "    Downloading $url"
+        curl -sSfL "$url" -o "$dest"
+        ;;
+      *)
+        local archive="roxy-${tag}-${target}.tar.gz"
+        local url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+        echo "    Downloading $url"
+        local tmp
+        tmp="$(mktemp -d)"
+        curl -sSfL "$url" -o "$tmp/$archive"
+        tar -xzf "$tmp/$archive" -C "$tmp"
+        cp "$tmp"/roxy-*/roxy "$dest"
+        rm -rf "$tmp"
+        ;;
+    esac
   else
     echo "    Building cargo --release --target $target"
     cargo build --release --locked --target "$target" --manifest-path "$ROOT_DIR/Cargo.toml"
-    cp "$ROOT_DIR/target/$target/release/roxy" "$dest"
+    cp "$ROOT_DIR/target/$target/release/$bin_name" "$dest"
   fi
 
   chmod +x "$dest"
@@ -173,7 +196,7 @@ generate_manifest() {
   "name": "${NAME}",
   "display_name": "${DISPLAY_NAME}",
   "version": "${VERSION}",
-  "description": "High-performance MCP proxy server. Bridges MCP clients to FastCGI or HTTP backends so you can write MCP handlers in any language.",
+  "description": "The MCP gateway for backends in any language. Connects any existing HTTP or FastCGI backend to the Model Context Protocol, handling transport, sessions, capability negotiation, structured output, and elicitation so your code doesn't have to.",
   "author": {
     "name": "petstack",
     "url": "https://github.com/${REPO}"
@@ -183,7 +206,7 @@ generate_manifest() {
     "type": "git",
     "url": "https://github.com/${REPO}"
   },
-  "keywords": ["proxy", "mcp", "fastcgi", "http", "php", "python"],
+  "keywords": ["mcp", "gateway", "proxy", "fastcgi", "http", "php", "python"],
   "server": {
     "type": "binary",
     "entry_point": "bin/${bin_name}",
@@ -277,9 +300,10 @@ if [[ -n "$LOCAL_BIN" ]]; then
   uname_s="$(uname -s)"
   uname_m="$(uname -m)"
   case "$uname_s" in
-    Darwin) plat="darwin" ;;
-    Linux)  plat="linux"  ;;
-    *)      plat="unknown" ;;
+    Darwin)               plat="darwin" ;;
+    Linux)                plat="linux"  ;;
+    MINGW*|MSYS*|CYGWIN*) plat="win32"  ;;
+    *)                    plat="unknown" ;;
   esac
   case "$uname_m" in
     arm64|aarch64) arch="arm64" ;;
@@ -292,6 +316,8 @@ if [[ -n "$LOCAL_BIN" ]]; then
     darwin-x64)    TARGETS=("x86_64-apple-darwin")   ;;
     linux-arm64)   TARGETS=("aarch64-unknown-linux-musl") ;;
     linux-x64)     TARGETS=("x86_64-unknown-linux-musl")  ;;
+    win32-arm64)   TARGETS=("aarch64-pc-windows-msvc") ;;
+    win32-x64)     TARGETS=("x86_64-pc-windows-msvc")  ;;
     *)
       echo "Cannot detect target for $(uname -sm). Use --target explicitly." >&2
       exit 1
