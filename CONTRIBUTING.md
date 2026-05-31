@@ -140,6 +140,14 @@ node handler.mjs
 cargo run -- --upstream http://localhost:8000/mcp
 ```
 
+## Releases
+
+Releases are automated. Pushing a version tag triggers GitHub Actions that:
+
+- build binaries for macOS (arm64 / x86_64), Linux (arm64 / x86_64, musl-static), and Windows (amd64 / arm64, MSVC);
+- publish `.deb` / `.rpm` packages and Windows `.zip` / portable `.exe` artifacts;
+- bump the Homebrew formula and the Scoop manifest.
+
 ## Code style
 
 - Run `cargo fmt` before committing.

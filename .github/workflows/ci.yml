@@ -45,3 +45,14 @@ jobs:
 
       - name: Test
         run: cargo test --locked --target ${{ matrix.target }}
+
+  docs:
+    name: docs (llms.txt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # llms.txt / llms-full.txt are generated from docs/en by scripts/llms.sh.
+      # Fail if a docs change wasn't followed by a regenerate.
+      - name: Check llms.txt is up to date
+        run: ./scripts/llms.sh --check

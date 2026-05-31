@@ -1,31 +1,15 @@
-# roxy — User Guide
+# roxy
 
-A friendly, illustrated guide for people who want to use **roxy** — no insider knowledge required.
+> roxy is a high-performance MCP gateway, written in Rust, that connects any existing backend — in any language — to the Model Context Protocol over HTTP(S) or FastCGI.
 
----
-
-## Table of contents
-
-1. [What is roxy, in one minute](#1-what-is-roxy-in-one-minute)
-2. [A tiny bit of vocabulary](#2-a-tiny-bit-of-vocabulary)
-3. [How roxy works (the big picture)](#3-how-roxy-works-the-big-picture)
-4. [Installing roxy](#4-installing-roxy)
-5. [Your first run in 2 steps](#5-your-first-run-in-2-steps)
-6. [Transport modes — stdio vs HTTP](#6-transport-modes--stdio-vs-http)
-7. [Connecting to your backend](#7-connecting-to-your-backend)
-8. [CLI flags reference](#8-cli-flags-reference)
-9. [Environment variables](#9-environment-variables)
-10. [The backend API (detailed)](#10-the-backend-api-detailed)
-11. [Header forwarding](#11-header-forwarding)
-12. [Logging and observability](#12-logging-and-observability)
-13. [Error messages — what they mean](#13-error-messages--what-they-mean)
-14. [Example backends](#14-example-backends)
-15. [Full configuration examples](#15-full-configuration-examples)
-16. [Frequently asked questions](#16-frequently-asked-questions)
+This file concatenates the full English documentation for roxy.
 
 ---
 
-## 1. What is roxy, in one minute
+
+# Introduction
+
+## What is roxy, in one minute
 
 Imagine you run a candy shop. People walk up to a little window, say what they want, and you hand it over. Simple.
 
@@ -49,7 +33,7 @@ flowchart LR
 
 ---
 
-## 2. A tiny bit of vocabulary
+## A tiny bit of vocabulary
 
 You'll see these words a lot. Here they are in one place, in plain English:
 
@@ -67,7 +51,7 @@ You'll see these words a lot. Here they are in one place, in plain English:
 
 ---
 
-## 3. How roxy works (the big picture)
+## How roxy works (the big picture)
 
 Here's everything that happens from the moment roxy starts up to the moment an AI assistant calls one of your tools:
 
@@ -95,7 +79,10 @@ Key idea: **your backend never sees MCP.** It only sees a simple, stable JSON pr
 
 ---
 
-## 4. Installing roxy
+
+# Installation & first run
+
+## Installing roxy
 
 Pick whichever method matches your setup. All methods install the same `roxy` binary.
 
@@ -168,7 +155,7 @@ roxy --help
 
 ---
 
-## 5. Your first run in 2 steps
+## Your first run in 2 steps
 
 The shortest path from zero to a working roxy.
 
@@ -195,11 +182,14 @@ This starts a small HTTP server on `http://127.0.0.1:8000/`.
 
 Restart Claude Desktop. Your tools will appear in the MCP panel. Done.
 
-Claude Desktop spawns `roxy` for you as a subprocess — you don't need to run it in a terminal yourself. If you want to run roxy as a long-lived network server instead (for remote clients or a team deployment), see [Transport modes](#6-transport-modes--stdio-vs-http) below.
+Claude Desktop spawns `roxy` for you as a subprocess — you don't need to run it in a terminal yourself. If you want to run roxy as a long-lived network server instead (for remote clients or a team deployment), see [Transport modes](configuration.md#transport-modes--stdio-vs-http).
 
 ---
 
-## 6. Transport modes — stdio vs HTTP
+
+# Configuration
+
+## Transport modes — stdio vs HTTP
 
 roxy offers two ways for the AI client to reach it. Pick the one that fits your situation.
 
@@ -240,7 +230,7 @@ roxy --transport http --port 8080 --upstream http://your-backend/
 
 ---
 
-## 7. Connecting to your backend
+## Connecting to your backend
 
 roxy figures out what kind of backend you have by looking at the `--upstream` value.
 
@@ -265,11 +255,11 @@ For **FastCGI** backends you also need to tell roxy *which script* to run, via `
 roxy --upstream 127.0.0.1:9000 --upstream-entrypoint /srv/app/handler.php
 ```
 
-For **HTTP** backends you can add headers, timeouts, and skip TLS verification if needed (see the next section).
+For **HTTP** backends you can add headers, timeouts, and skip TLS verification if needed (see the flags below).
 
 ---
 
-## 8. CLI flags reference
+## CLI flags reference
 
 Every flag has a matching environment variable. Precedence: **CLI > environment > default**.
 
@@ -294,7 +284,7 @@ roxy --version
 
 ---
 
-## 9. Environment variables
+## Environment variables
 
 Every flag above can be set via its `ROXY_*` equivalent. A few notes:
 
@@ -312,15 +302,16 @@ Every flag above can be set via its `ROXY_*` equivalent. A few notes:
   ROXY_UPSTREAM_HEADER=$'Authorization: Bearer abcdef\nX-Tenant: acme' roxy --upstream ...
   ```
   If you pass `--upstream-header` on the command line *at all*, the environment value is ignored entirely — no merging.
-- **`RUST_LOG`** controls log verbosity (see [Logging](#12-logging-and-observability)). It's not a `ROXY_*` variable because it's handled by the standard Rust logging stack.
+- **`RUST_LOG`** controls log verbosity (see [Logging](operations.md#logging-and-observability)). It's not a `ROXY_*` variable because it's handled by the standard Rust logging stack.
 
 ---
 
-## 10. The backend API (detailed)
+
+# The backend API
 
 This is the **contract** your backend must fulfill. It's plain JSON over HTTP or FastCGI. Your backend never sees MCP — only these simple messages.
 
-### How a request looks
+## How a request looks
 
 Every request roxy sends is a JSON object with a shared envelope plus request-specific fields:
 
@@ -339,7 +330,7 @@ Every request roxy sends is a JSON object with a shared envelope plus request-sp
 | `session_id` | string or null | A stable ID for the conversation. Echo it back when useful. |
 | `request_id` | string | Unique per request. Useful for logging and tracing. |
 
-### Request types at a glance
+## Request types at a glance
 
 ```mermaid
 flowchart TB
@@ -369,7 +360,7 @@ flowchart TB
 
 ---
 
-### 10.1 `discover`
+## `discover`
 
 Sent whenever an MCP client asks roxy to list tools, resources, or prompts. roxy does not cache the response — each `list_*` call from the client triggers a fresh `discover`, so changes you make to your backend's catalogue show up on the next listing without restarting roxy.
 
@@ -472,7 +463,7 @@ Prompt argument:
 
 ---
 
-### 10.2 `call_tool`
+## `call_tool`
 
 Sent whenever the AI invokes one of your tools.
 
@@ -598,7 +589,7 @@ You can elicit as many rounds as you need — each new `call_tool` carries the p
 
 ---
 
-### 10.3 `read_resource`
+## `read_resource`
 
 Sent when the AI wants to read one of your resources.
 
@@ -625,7 +616,7 @@ Sent when the AI wants to read one of your resources.
 
 ---
 
-### 10.4 `get_prompt`
+## `get_prompt`
 
 Sent when the AI wants to render a prompt template.
 
@@ -653,7 +644,7 @@ Sent when the AI wants to render a prompt template.
 
 ---
 
-### 10.5 `elicitation_cancelled`
+## `elicitation_cancelled`
 
 Sent when a user declines or cancels an elicitation form you asked for. Use it to clean up pending state. roxy does not care what you return.
 
@@ -677,7 +668,7 @@ Sent when a user declines or cancels an elicitation form you asked for. Use it t
 
 ---
 
-### 10.6 Content blocks — shared format
+## Content blocks — shared format
 
 Anything that returns `content` uses the same shape: an array of blocks.
 
@@ -690,7 +681,10 @@ You can mix text and resource links in one response.
 
 ---
 
-## 11. Header forwarding
+
+# Operations
+
+## Header forwarding
 
 When roxy runs in **HTTP transport** mode, every header the MCP client sends is automatically forwarded to your backend. This is how authorization, session IDs, and tracing headers reach your app without you configuring anything.
 
@@ -737,7 +731,7 @@ There's no incoming HTTP request at all, so nothing is forwarded. Static `--upst
 
 ---
 
-## 12. Logging and observability
+## Logging and observability
 
 roxy writes structured logs to standard error.
 
@@ -779,7 +773,7 @@ With `RUST_LOG=debug` you also see the request URL, forwarded headers, and respo
 
 ---
 
-## 13. Error messages — what they mean
+## Error messages — what they mean
 
 A quick guide to the most common problems.
 
@@ -801,7 +795,10 @@ Errors that happen mid-request are also returned to the MCP client as standard J
 
 ---
 
-## 14. Example backends
+
+# Examples & FAQ
+
+## Example backends
 
 Complete, runnable examples live in the `examples/` folder. They all implement the same feature set so you can compare languages side by side.
 
@@ -816,7 +813,7 @@ Each example demonstrates tools, resources, prompts, elicitation, structured out
 
 ---
 
-## 15. Full configuration examples
+## Full configuration examples
 
 ### Claude Desktop + a Python backend
 
@@ -893,13 +890,13 @@ roxy
 
 ---
 
-## 16. Frequently asked questions
+## Frequently asked questions
 
 **Do I need to know Rust to use roxy?**
 No. roxy is written in Rust, but you only ever write your backend, in any language you like.
 
 **Does my backend need to speak MCP?**
-No. Your backend speaks the simple JSON protocol described in [section 10](#10-the-backend-api-detailed). roxy handles MCP for you.
+No. Your backend speaks the simple JSON protocol described in [The backend API](backend-api.md). roxy handles MCP for you.
 
 **Can roxy serve multiple clients at the same time?**
 Yes. Under `--transport http` many clients can connect in parallel.
@@ -917,7 +914,7 @@ Existing in-flight requests will fail with a connection error and be reported to
 Nothing special is needed. roxy calls `discover` on every `list_tools`/`list_resources`/`list_prompts` request, so the client sees your new catalogue the next time it lists.
 
 **Why are some headers missing from my backend?**
-They were probably hop-by-hop headers or internally managed by roxy. See [section 11](#11-header-forwarding).
+They were probably hop-by-hop headers or internally managed by roxy. See [Header forwarding](operations.md#header-forwarding).
 
 **Can I use HTTPS between roxy and my backend?**
 Yes — just use an `https://` URL in `--upstream`. For development against a self-signed cert, add `--upstream-insecure`.
@@ -928,3 +925,67 @@ Yes. The static Linux tarball works in any minimal container. Expose the port if
 ---
 
 Happy routing. If anything here is unclear, that's a documentation bug — please let the roxy team know.
+
+---
+
+
+# Architecture
+
+roxy is a small Rust project (edition 2024). It handles everything
+performance-critical — the `stdio` and Streamable HTTP transports, protocol
+parsing, FastCGI connection pooling, TLS via rustls, and header forwarding —
+through the official `rmcp` crate. Your backend only ever deals with the small
+JSON contract described in [The backend API](backend-api.md).
+
+```mermaid
+flowchart LR
+    A[MCP client] -- rmcp: stdio / HTTP+SSE --> S[RoxyServer]
+    S -- UpstreamExecutor --> E{executor}
+    E -- FastCgiExecutor --> F[FastCGI backend]
+    E -- HttpExecutor --> H[HTTP backend]
+```
+
+An MCP client talks to `RoxyServer` over a transport; `RoxyServer` translates
+each call into the internal JSON protocol and forwards it to the configured
+`UpstreamExecutor`, which speaks either FastCGI or HTTP to your backend.
+
+## Source map
+
+| File | Responsibility |
+|---|---|
+| [`src/main.rs`](https://github.com/petstack/roxy/blob/main/src/main.rs) | Entry point — parses the CLI, selects the executor, starts the stdio or HTTP transport. |
+| [`src/config.rs`](https://github.com/petstack/roxy/blob/main/src/config.rs) | CLI configuration via `clap`; `UpstreamKind` auto-detection from the `--upstream` URL. |
+| [`src/server.rs`](https://github.com/petstack/roxy/blob/main/src/server.rs) | `RoxyServer<E>` — implements `rmcp::ServerHandler`, discovers upstream capabilities per request, forwards MCP calls to the configured executor, and filters hop-by-hop headers for forwarding. |
+| [`src/protocol.rs`](https://github.com/petstack/roxy/blob/main/src/protocol.rs) | The internal JSON protocol — `UpstreamRequest`, `UpstreamCallResult`, `UpstreamDiscoverResponse`, `UpstreamEnvelope`. |
+| [`src/executor/mod.rs`](https://github.com/petstack/roxy/blob/main/src/executor/mod.rs) | The `UpstreamExecutor` trait with `execute()` and `discover()`, plus the per-request `ExecuteContext`. |
+| [`src/executor/fastcgi.rs`](https://github.com/petstack/roxy/blob/main/src/executor/fastcgi.rs) | `FastCgiExecutor` — TCP or Unix socket, `deadpool` connection pooling, CGI `HTTP_*` parameter mapping. |
+| [`src/executor/http.rs`](https://github.com/petstack/roxy/blob/main/src/executor/http.rs) | `HttpExecutor` — `reqwest` + rustls, custom headers, configurable timeouts, optional TLS-verification skip. |
+
+## Example backends
+
+Runnable reference handlers live in [`examples/`](https://github.com/petstack/roxy/tree/main/examples):
+[`handler.py`](https://github.com/petstack/roxy/blob/main/examples/handler.py) (Python, HTTP),
+[`handler.ts`](https://github.com/petstack/roxy/blob/main/examples/handler.ts) (TypeScript/Node, HTTP), and
+[`handler.php`](https://github.com/petstack/roxy/blob/main/examples/handler.php) (PHP via FastCGI).
+[`echo_upstream.rs`](https://github.com/petstack/roxy/blob/main/examples/echo_upstream.rs) and
+[`bench_client.rs`](https://github.com/petstack/roxy/blob/main/examples/bench_client.rs) back the test
+and benchmark suites. See [Examples & FAQ](examples-and-faq.md) for how to run them.
+
+## Key dependencies
+
+Declared in [`Cargo.toml`](https://github.com/petstack/roxy/blob/main/Cargo.toml):
+
+- `rmcp` — the official MCP SDK (transport, protocol, `ServerHandler`).
+- `fastcgi-client` + `deadpool` — FastCGI client and connection pooling.
+- `reqwest` (rustls) — the HTTP(S) upstream client.
+- `tokio` — async runtime; `axum` — the HTTP server used by rmcp for the SSE transport.
+
+## Building and contributing
+
+Build, test, lint, and local-development instructions, plus the release process,
+are in [`CONTRIBUTING.md`](https://github.com/petstack/roxy/blob/main/CONTRIBUTING.md).
+Packaging (Homebrew, Scoop, `.deb`, `.rpm`, static tarball) lives under
+[`packaging/`](https://github.com/petstack/roxy/tree/main/packaging), and the
+prebuilt-binary installer is [`install.sh`](https://github.com/petstack/roxy/blob/main/install.sh).
+Translated overviews are under [`i18n/`](https://github.com/petstack/roxy/tree/main/i18n)
+(ru, uk, be, pl, de, fr, es, zh-CN, ja).
