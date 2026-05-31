@@ -1,0 +1,35 @@
+{
+    "version": "REPLACE_WITH_VERSION",
+    "description": "High-performance MCP proxy server bridging MCP clients to FastCGI/HTTP backends",
+    "homepage": "https://github.com/petstack/roxy",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/petstack/roxy/releases/download/vREPLACE_WITH_VERSION/roxy-vREPLACE_WITH_VERSION-x86_64-pc-windows-msvc.zip",
+            "hash": "REPLACE_WITH_X86_64_PC_WINDOWS_MSVC_SHA256",
+            "extract_dir": "roxy-vREPLACE_WITH_VERSION-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/petstack/roxy/releases/download/vREPLACE_WITH_VERSION/roxy-vREPLACE_WITH_VERSION-aarch64-pc-windows-msvc.zip",
+            "hash": "REPLACE_WITH_AARCH64_PC_WINDOWS_MSVC_SHA256",
+            "extract_dir": "roxy-vREPLACE_WITH_VERSION-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": "roxy.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/petstack/roxy/releases/download/v$version/roxy-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "roxy-v$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/petstack/roxy/releases/download/v$version/roxy-v$version-aarch64-pc-windows-msvc.zip",
+                "extract_dir": "roxy-v$version-aarch64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}

@@ -63,6 +63,14 @@ Homebrew がインストールされた macOS (Intel および Apple Silicon) �
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Windows ユーザーは、ポータブルな `roxy.exe` または `.zip` を [Releases](https://github.com/petstack/roxy/releases) ページから直接入手することもできます。Windows では、FastCGI upstream は TCP アドレス (`host:port`) を使用する必要があります。Unix ソケットの upstream は Unix 専用です — HTTP または TCP FastCGI を使用してください。
+
 スクリプトは OS とアーキテクチャを自動検出し、GitHub Releases から正しい tarball をダウンロードし、SHA256 チェックサムを検証して、`/usr/local/bin/roxy` にインストールします (必要に応じて `sudo` を使用)。
 
 オプション:
@@ -618,11 +626,11 @@ cargo run -- \
 
 タグ付きリリース (`git tag vX.Y.Z && git push origin vX.Y.Z`) は `.github/workflows/release.yml` をトリガーし、以下を行います:
 
-1. 4 つすべてのターゲット (macOS arm64/x86_64、Linux musl arm64/x86_64) の release バイナリをビルド
+1. すべてのターゲット (macOS arm64/x86_64、Linux musl arm64/x86_64、Windows amd64/arm64) の release バイナリをビルド
 2. SHA256 チェックサム付きで `.tar.gz` としてパッケージ化
-3. 両方の Linux アーキテクチャ向けの `.deb` と `.rpm` パッケージをビルド
+3. 両方の Linux アーキテクチャ向けの `.deb` と `.rpm` パッケージ、および Windows `.zip` / ポータブル `.exe` アーティファクトをビルド
 4. すべてのアーティファクトを含む GitHub Release を公開
-5. [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) の Homebrew formula を更新 (`HOMEBREW_TAP_TOKEN` シークレットが設定されている場合)
+5. [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) の Homebrew formula と Scoop マニフェストを更新 (`HOMEBREW_TAP_TOKEN` シークレットが設定されている場合)
 
 tap のセットアップについては [`packaging/homebrew/README.md`](../packaging/homebrew/README.md) を参照してください。
 

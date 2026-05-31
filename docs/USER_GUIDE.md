@@ -138,6 +138,27 @@ curl -sSfL https://github.com/petstack/roxy/releases/latest/download/roxy-v0.1.0
 sudo install -m 755 roxy-v0.1.0-x86_64-unknown-linux-musl/roxy /usr/local/bin/
 ```
 
+### Windows (amd64 or arm64)
+
+**Scoop** (recommended — picks the right architecture automatically):
+
+```powershell
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+**Portable `.exe` or `.zip`** — download directly from the [Releases](https://github.com/petstack/roxy/releases) page. Each release ships a `roxy-vX.Y.Z-x86_64-pc-windows-msvc.zip` / `…-aarch64-pc-windows-msvc.zip` and a bare `roxy.exe` for each architecture (with matching `.sha256` files):
+
+```powershell
+# Example: amd64 zip
+Invoke-WebRequest -Uri https://github.com/petstack/roxy/releases/latest/download/roxy-v0.1.0-x86_64-pc-windows-msvc.zip -OutFile roxy.zip
+Expand-Archive roxy.zip -DestinationPath .
+# roxy.exe is inside roxy-v0.1.0-x86_64-pc-windows-msvc\
+```
+
+> [!WARNING]
+> On Windows, FastCGI upstreams must use a **TCP address** (`host:port`). Unix-domain-socket upstreams are a Unix-only feature — use HTTP or TCP FastCGI instead. (PHP-FPM on Windows listens over TCP anyway.)
+
 ### Check it worked
 
 ```

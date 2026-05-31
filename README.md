@@ -38,6 +38,14 @@ brew install roxy
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Windows users can also grab the portable `roxy.exe` or the `.zip` directly from the [Releases](https://github.com/petstack/roxy/releases) page. On Windows, FastCGI upstreams must use a TCP address (`host:port`); Unix-socket upstreams are Unix-only — use HTTP or TCP FastCGI.
+
 More options (`.deb`, `.rpm`, static tarball, from source): see the [User Guide → Installing roxy](docs/USER_GUIDE.md#4-installing-roxy).
 
 Verify:
@@ -151,7 +159,7 @@ cargo fmt
 
 Architecture map, source layout, and contributor notes: see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLAUDE.md`](CLAUDE.md).
 
-Release process — tagged pushes trigger GitHub Actions that build binaries for macOS (arm64/x86_64) and Linux (arm64/x86_64, musl-static), publish `.deb` / `.rpm` packages, and bump the Homebrew formula.
+Release process — tagged pushes trigger GitHub Actions that build binaries for macOS (arm64/x86_64), Linux (arm64/x86_64, musl-static), and Windows (amd64/arm64), publish `.deb` / `.rpm` packages and Windows `.zip` / portable `.exe` artifacts, and bump the Homebrew formula and Scoop manifest.
 
 ---
 

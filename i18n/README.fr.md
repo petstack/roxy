@@ -63,6 +63,14 @@ Fonctionne sur macOS (Intel et Apple Silicon) et Linux (x86_64 et arm64) avec Ho
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Les utilisateurs Windows peuvent aussi récupérer le `roxy.exe` portable ou le `.zip` directement depuis la page [Releases](https://github.com/petstack/roxy/releases). Sous Windows, les upstreams FastCGI doivent utiliser une adresse TCP (`host:port`) ; les upstreams sur socket Unix ne fonctionnent que sous Unix — utilisez HTTP ou FastCGI en TCP.
+
 Le script détecte automatiquement votre système et votre architecture, télécharge le bon tarball depuis GitHub Releases, vérifie la somme de contrôle SHA256 et installe vers `/usr/local/bin/roxy` (en utilisant `sudo` si nécessaire).
 
 Options :
@@ -618,11 +626,11 @@ Puis connectez-vous avec n'importe quel client MCP, ou envoyez du JSON-RPC manue
 
 Les releases taguées (`git tag vX.Y.Z && git push origin vX.Y.Z`) déclenchent `.github/workflows/release.yml`, qui :
 
-1. Compile les binaires de release pour les quatre targets (macOS arm64/x86_64, Linux musl arm64/x86_64)
+1. Compile les binaires de release pour les six targets (macOS arm64/x86_64, Linux musl arm64/x86_64, Windows amd64/arm64)
 2. Les empaquette en `.tar.gz` avec des sommes de contrôle SHA256
-3. Construit des paquets `.deb` et `.rpm` pour les deux architectures Linux
+3. Construit des paquets `.deb` et `.rpm` pour les deux architectures Linux, ainsi que des artefacts Windows `.zip` / `.exe` portable
 4. Publie une GitHub Release avec tous les artefacts
-5. Met à jour la formule Homebrew dans [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (si le secret `HOMEBREW_TAP_TOKEN` est défini)
+5. Met à jour la formule Homebrew dans [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (si le secret `HOMEBREW_TAP_TOKEN` est défini) ainsi que le manifeste Scoop
 
 Configuration du tap — voir [`packaging/homebrew/README.md`](../packaging/homebrew/README.md).
 

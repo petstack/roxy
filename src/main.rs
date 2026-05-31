@@ -14,7 +14,6 @@ use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
 use roxy::server::RoxyServer;
 
-
 fn init_logging(format: &LogFormat) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()

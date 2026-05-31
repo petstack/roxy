@@ -63,6 +63,14 @@ Działa na macOS (Intel i Apple Silicon) oraz Linux (x86_64 i arm64) z zainstalo
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Użytkownicy Windows mogą również pobrać przenośny plik `roxy.exe` lub `.zip` bezpośrednio ze strony [Releases](https://github.com/petstack/roxy/releases). W systemie Windows upstreamy FastCGI muszą używać adresu TCP (`host:port`); upstreamy oparte na socketach Unix są dostępne tylko w systemach Unix — użyj HTTP lub FastCGI przez TCP.
+
 Skrypt automatycznie wykrywa Twój system operacyjny i architekturę, pobiera właściwy tarball z GitHub Releases, weryfikuje sumę kontrolną SHA256 i instaluje binarkę w `/usr/local/bin/roxy` (w razie potrzeby używając `sudo`).
 
 Opcje:
@@ -618,11 +626,11 @@ Następnie połącz się dowolnym klientem MCP lub wysyłaj JSON-RPC ręcznie pr
 
 Otagowane wydania (`git tag vX.Y.Z && git push origin vX.Y.Z`) uruchamiają `.github/workflows/release.yml`, który:
 
-1. Buduje binaria release dla wszystkich czterech targetów (macOS arm64/x86_64, Linux musl arm64/x86_64)
+1. Buduje binaria release dla macOS (arm64/x86_64), Linux (musl arm64/x86_64) oraz Windows (amd64/arm64)
 2. Pakuje je jako `.tar.gz` z sumami kontrolnymi SHA256
-3. Buduje pakiety `.deb` i `.rpm` dla obu architektur Linuksa
+3. Buduje pakiety `.deb` i `.rpm` dla obu architektur Linuksa oraz artefakty `.zip` i przenośne `.exe` dla Windows
 4. Publikuje GitHub Release ze wszystkimi artefaktami
-5. Aktualizuje formułę Homebrew w [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (jeśli ustawiony jest sekret `HOMEBREW_TAP_TOKEN`)
+5. Aktualizuje formułę Homebrew w [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) oraz manifest Scoop (jeśli ustawiony jest sekret `HOMEBREW_TAP_TOKEN`)
 
 Konfiguracja tapa — patrz [`packaging/homebrew/README.md`](../packaging/homebrew/README.md).
 

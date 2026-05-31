@@ -63,6 +63,14 @@ Funciona en macOS (Intel y Apple Silicon) y Linux (x86_64 y arm64) con Homebrew 
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Los usuarios de Windows también pueden obtener el `roxy.exe` portable o el `.zip` directamente desde la página de [Releases](https://github.com/petstack/roxy/releases). En Windows, los upstreams FastCGI deben usar una dirección TCP (`host:port`); los upstreams por socket Unix son exclusivos de Unix — usa HTTP o FastCGI por TCP.
+
 El script detecta automáticamente tu sistema operativo y arquitectura, descarga el tarball correcto desde GitHub Releases, verifica el checksum SHA256 e instala en `/usr/local/bin/roxy` (usando `sudo` si hace falta).
 
 Opciones:
@@ -619,11 +627,11 @@ Luego conéctate con cualquier cliente MCP, o envía JSON-RPC manualmente por st
 
 Los releases taggeados (`git tag vX.Y.Z && git push origin vX.Y.Z`) disparan `.github/workflows/release.yml`, que:
 
-1. Compila binarios de release para los cuatro targets (macOS arm64/x86_64, Linux musl arm64/x86_64)
+1. Compila binarios de release para macOS (arm64/x86_64), Linux (arm64/x86_64, musl estático) y Windows (amd64/arm64)
 2. Los empaqueta como `.tar.gz` con checksums SHA256
-3. Construye paquetes `.deb` y `.rpm` para ambas arquitecturas de Linux
+3. Construye paquetes `.deb` y `.rpm` para ambas arquitecturas de Linux, además de artefactos `.zip` y `.exe` portable para Windows
 4. Publica una GitHub Release con todos los artefactos
-5. Actualiza la fórmula de Homebrew en [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (si el secreto `HOMEBREW_TAP_TOKEN` está configurado)
+5. Actualiza la fórmula de Homebrew en [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (si el secreto `HOMEBREW_TAP_TOKEN` está configurado) y el manifiesto de Scoop
 
 Configuración del tap — ver [`packaging/homebrew/README.md`](../packaging/homebrew/README.md).
 

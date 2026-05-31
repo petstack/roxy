@@ -63,6 +63,14 @@ Funktioniert auf macOS (Intel und Apple Silicon) und Linux (x86_64 und arm64) mi
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Windows-Nutzer können auch die portable `roxy.exe` oder das `.zip` direkt von der [Releases](https://github.com/petstack/roxy/releases)-Seite herunterladen. Unter Windows müssen FastCGI-Upstreams eine TCP-Adresse (`host:port`) verwenden; Unix-Socket-Upstreams gibt es nur unter Unix — nutze HTTP oder TCP-FastCGI.
+
 Das Skript erkennt automatisch dein Betriebssystem und deine Architektur, lädt das passende Tarball von GitHub Releases herunter, prüft die SHA256-Prüfsumme und installiert nach `/usr/local/bin/roxy` (bei Bedarf mit `sudo`).
 
 Optionen:
@@ -619,11 +627,11 @@ Dann mit einem beliebigen MCP-Client verbinden oder JSON-RPC manuell über stdio
 
 Getaggte Releases (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggern `.github/workflows/release.yml`, das:
 
-1. Release-Binaries für alle vier Targets baut (macOS arm64/x86_64, Linux musl arm64/x86_64)
+1. Release-Binaries für macOS arm64/x86_64, Linux musl arm64/x86_64 und Windows amd64/arm64 baut
 2. Sie als `.tar.gz` mit SHA256-Prüfsummen verpackt
-3. `.deb`- und `.rpm`-Pakete für beide Linux-Architekturen baut
+3. `.deb`- und `.rpm`-Pakete für beide Linux-Architekturen sowie Windows-`.zip`- / portable `.exe`-Artefakte baut
 4. Ein GitHub Release mit allen Artefakten veröffentlicht
-5. Die Homebrew-Formel in [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) bumpt (wenn das `HOMEBREW_TAP_TOKEN`-Secret gesetzt ist)
+5. Die Homebrew-Formel in [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) und das Scoop-Manifest bumpt (wenn das `HOMEBREW_TAP_TOKEN`-Secret gesetzt ist)
 
 Tap-Setup — siehe [`packaging/homebrew/README.md`](../packaging/homebrew/README.md).
 

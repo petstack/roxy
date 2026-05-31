@@ -3,7 +3,9 @@ use std::time::Duration;
 use anyhow::Context;
 use deadpool::managed;
 use fastcgi_client::{Client, Params, Request, conn::KeepAlive, io};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio_util::compat::Compat;
 use tracing::{debug, warn};
 
@@ -100,6 +102,7 @@ fn build_fcgi_params<'a>(
 // --- Pool manager types ---
 
 type TcpFcgiClient = Client<Compat<TcpStream>, KeepAlive>;
+#[cfg(unix)]
 type UnixFcgiClient = Client<Compat<UnixStream>, KeepAlive>;
 
 struct TcpFcgiManager {
@@ -124,10 +127,12 @@ impl managed::Manager for TcpFcgiManager {
     }
 }
 
+#[cfg(unix)]
 struct UnixFcgiManager {
     path: String,
 }
 
+#[cfg(unix)]
 impl managed::Manager for UnixFcgiManager {
     type Type = UnixFcgiClient;
     type Error = std::io::Error;
@@ -148,6 +153,7 @@ impl managed::Manager for UnixFcgiManager {
 
 enum FcgiPool {
     Tcp(managed::Pool<TcpFcgiManager>),
+    #[cfg(unix)]
     Unix(managed::Pool<UnixFcgiManager>),
 }
 
@@ -184,6 +190,7 @@ impl FastCgiExecutor {
                     .context("failed to build TCP FastCGI pool")?;
                 FcgiPool::Tcp(pool)
             }
+            #[cfg(unix)]
             FcgiAddress::Unix(path) => {
                 let mgr = UnixFcgiManager { path: path.clone() };
                 let pool = managed::Pool::builder(mgr)
@@ -191,6 +198,16 @@ impl FastCgiExecutor {
                     .build()
                     .context("failed to build Unix FastCGI pool")?;
                 FcgiPool::Unix(pool)
+            }
+            // Windows lacks `tokio::net::UnixStream`. PHP-FPM/FastCGI Unix
+            // sockets are a Unix concept anyway — on Windows use a TCP
+            // address (host:port) or an HTTP upstream.
+            #[cfg(not(unix))]
+            FcgiAddress::Unix(_path) => {
+                anyhow::bail!(
+                    "Unix domain socket upstreams are not supported on Windows; \
+                     use a TCP address (e.g. 127.0.0.1:9000) or an HTTP upstream"
+                );
             }
         };
 
@@ -229,6 +246,7 @@ impl FastCgiExecutor {
                     .map_err(anyhow::Error::from);
                 detach_on_error(conn, res)?
             }
+            #[cfg(unix)]
             FcgiPool::Unix(pool) => {
                 let mut conn = acquire(pool, self.pool_wait_timeout).await?;
                 debug!("sending FastCGI request via Unix socket");
@@ -269,10 +287,7 @@ pub fn body_start_offset(raw: &[u8]) -> usize {
 /// indefinite client-side hang. Wrapping with `tokio::time::timeout` caps
 /// the wait and surfaces the exhaustion as an error that propagates back to
 /// the MCP client instead of silently stalling.
-async fn acquire<M>(
-    pool: &managed::Pool<M>,
-    wait: Duration,
-) -> anyhow::Result<managed::Object<M>>
+async fn acquire<M>(pool: &managed::Pool<M>, wait: Duration) -> anyhow::Result<managed::Object<M>>
 where
     M: managed::Manager,
     M::Error: std::fmt::Display,

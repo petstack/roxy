@@ -63,6 +63,14 @@ brew install roxy
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Користувачі Windows також можуть завантажити портативний `roxy.exe` або `.zip` безпосередньо зі сторінки [Releases](https://github.com/petstack/roxy/releases). У Windows FastCGI-upstream'и мають використовувати TCP-адресу (`host:port`); upstream'и через Unix-сокет доступні лише на Unix — використовуйте HTTP або TCP FastCGI.
+
 Скрипт автоматично визначає вашу ОС та архітектуру, завантажує потрібний tarball з GitHub Releases, перевіряє контрольну суму SHA256 і встановлює бінар у `/usr/local/bin/roxy` (за потреби через `sudo`).
 
 Опції:
@@ -619,11 +627,11 @@ cargo run -- \
 
 Теговані релізи (`git tag vX.Y.Z && git push origin vX.Y.Z`) запускають `.github/workflows/release.yml`, який:
 
-1. Збирає release-бінари для всіх чотирьох таргетів (macOS arm64/x86_64, Linux musl arm64/x86_64)
+1. Збирає release-бінари для всіх п’яти таргетів (macOS arm64/x86_64, Linux musl arm64/x86_64, Windows amd64/arm64)
 2. Пакує їх у `.tar.gz` з SHA256-хешами
-3. Збирає `.deb` і `.rpm` пакети для обох Linux-архітектур
+3. Збирає `.deb` і `.rpm` пакети для обох Linux-архітектур, а також Windows-артефакти `.zip` / портативний `.exe`
 4. Публікує GitHub Release з усіма артефактами
-5. Оновлює формулу Homebrew у [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) (якщо задано секрет `HOMEBREW_TAP_TOKEN`)
+5. Оновлює формулу Homebrew у [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) і маніфест Scoop (якщо задано секрет `HOMEBREW_TAP_TOKEN`)
 
 Налаштування tap — див. [`packaging/homebrew/README.md`](../packaging/homebrew/README.md).
 

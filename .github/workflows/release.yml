@@ -25,6 +25,10 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +50,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package archive
+      - name: Package archive (Unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
         shell: bash
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -60,6 +65,38 @@ jobs:
           tar -czf "${staging}.tar.gz" "$staging"
           shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           cat "${staging}.tar.gz.sha256"
+
+      - name: Package archive (Windows)
+        if: ${{ contains(matrix.target, 'windows') }}
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $staging = "roxy-$env:REF_NAME-$env:TARGET"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/$env:TARGET/release/roxy.exe" "$staging/"
+          Copy-Item LICENSE, README.md "$staging/"
+
+          # Emit a `<lowercase-hash>  <file>` line, matching the column
+          # format `shasum -a 256` produces on the Unix targets so the
+          # homebrew/scoop tap jobs can parse every platform identically.
+          function Write-Sha256($file) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
+            "$hash  $file" | Out-File -FilePath "$file.sha256" -Encoding ascii
+            Get-Content "$file.sha256"
+          }
+
+          # .zip archive (scoop / manual download)
+          $zip = "$staging.zip"
+          Compress-Archive -Path $staging -DestinationPath $zip -Force
+          Write-Sha256 $zip
+
+          # Portable bare .exe alongside the zip
+          $exe = "$staging.exe"
+          Copy-Item "target/$env:TARGET/release/roxy.exe" $exe
+          Write-Sha256 $exe
 
       - name: Install cargo-deb
         if: endsWith(matrix.target, '-unknown-linux-musl')
@@ -121,6 +158,10 @@ jobs:
             roxy_*.deb.sha256
             roxy-*.rpm
             roxy-*.rpm.sha256
+            roxy-*.zip
+            roxy-*.zip.sha256
+            roxy-*.exe
+            roxy-*.exe.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -149,6 +190,10 @@ jobs:
             artifacts/roxy_*.deb.sha256
             artifacts/roxy-*.rpm
             artifacts/roxy-*.rpm.sha256
+            artifacts/roxy-*.zip
+            artifacts/roxy-*.zip.sha256
+            artifacts/roxy-*.exe
+            artifacts/roxy-*.exe.sha256
           generate_release_notes: true
           draft: false
           prerelease: false
@@ -241,6 +286,100 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/roxy.rb
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "roxy ${REF_NAME}"
+          git push
+
+  scoop:
+    name: update scoop bucket
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Check for SCOOP_BUCKET_TOKEN
+        id: check
+        env:
+          TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SCOOP_BUCKET_TOKEN secret not set — skipping bucket update."
+            echo "See packaging/scoop/README.md for setup instructions."
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source repo (for manifest template)
+        if: steps.check.outputs.has_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout scoop-bucket
+        if: steps.check.outputs.has_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/scoop-bucket
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: bucket
+
+      - name: Update manifest with new version and SHA256s
+        if: steps.check.outputs.has_token == 'true'
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF_NAME#v}"
+
+          # Start from the template shipped in the source repo
+          mkdir -p bucket/bucket
+          cp source/packaging/scoop/roxy.json bucket/bucket/roxy.json
+
+          # Substitute version into the static fields (the autoupdate block
+          # keeps scoop's own literal $version token, untouched).
+          sed -i "s|REPLACE_WITH_VERSION|${VERSION}|g" bucket/bucket/roxy.json
+
+          # Fetch SHA256 for each Windows .zip from the just-published release
+          # and substitute its placeholder in the manifest.
+          for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            archive="roxy-${REF_NAME}-${target}.zip"
+            sha_url="https://github.com/${REPO}/releases/download/${REF_NAME}/${archive}.sha256"
+            sha="$(curl -sSfL "$sha_url" | awk '{print $1}')"
+            if [ -z "$sha" ] || [ "${#sha}" -ne 64 ]; then
+              echo "error: failed to fetch valid SHA256 for ${target} (got: '${sha}')" >&2
+              exit 1
+            fi
+            placeholder="REPLACE_WITH_$(echo "${target}" | tr 'a-z-' 'A-Z_')_SHA256"
+            sed -i "s|${placeholder}|${sha}|" bucket/bucket/roxy.json
+            echo "  ${target} -> ${sha}"
+          done
+
+          # Safety check: no SHA256 placeholders should remain.
+          if grep -q '"hash": "REPLACE_WITH' bucket/bucket/roxy.json; then
+            echo "error: unsubstituted placeholders remain in manifest:" >&2
+            grep '"hash": "REPLACE_WITH' bucket/bucket/roxy.json >&2
+            exit 1
+          fi
+
+          echo ""
+          echo "===== Updated bucket/roxy.json ====="
+          cat bucket/bucket/roxy.json
+
+      - name: Commit and push to scoop-bucket
+        if: steps.check.outputs.has_token == 'true'
+        working-directory: bucket
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/roxy.json
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0

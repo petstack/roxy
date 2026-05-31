@@ -63,6 +63,14 @@ brew install roxy
 curl -sSfL https://raw.githubusercontent.com/petstack/roxy/main/install.sh | sh
 ```
 
+```powershell
+# Windows (amd64 / arm64) — Scoop
+scoop bucket add petstack https://github.com/petstack/scoop-bucket
+scoop install roxy
+```
+
+Windows 用户也可以直接从 [Releases](https://github.com/petstack/roxy/releases) 页面获取便携版 `roxy.exe` 或 `.zip` 压缩包。在 Windows 上，FastCGI 上游必须使用 TCP 地址（`host:port`）；Unix socket 上游仅限 Unix 平台——请改用 HTTP 或 TCP FastCGI。
+
 脚本会自动检测你的操作系统和架构,从 GitHub Releases 下载正确的 tarball,验证 SHA256 校验和,并安装到 `/usr/local/bin/roxy`(必要时使用 `sudo`)。
 
 选项:
@@ -618,11 +626,11 @@ cargo run -- \
 
 标签发布(`git tag vX.Y.Z && git push origin vX.Y.Z`)会触发 `.github/workflows/release.yml`,它会:
 
-1. 为所有四个目标构建 release 二进制(macOS arm64/x86_64、Linux musl arm64/x86_64)
+1. 为所有目标构建 release 二进制(macOS arm64/x86_64、Linux musl arm64/x86_64、Windows amd64/arm64)
 2. 将它们打包为 `.tar.gz`,并带有 SHA256 校验和
-3. 为两种 Linux 架构构建 `.deb` 和 `.rpm` 软件包
+3. 为两种 Linux 架构构建 `.deb` 和 `.rpm` 软件包,并发布 Windows `.zip` / 便携版 `.exe` 工件
 4. 发布带有所有工件的 GitHub Release
-5. 更新 [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) 中的 Homebrew 公式(如果设置了 `HOMEBREW_TAP_TOKEN` 密钥)
+5. 更新 [`petstack/homebrew-tap`](https://github.com/petstack/homebrew-tap) 中的 Homebrew 公式和 Scoop manifest(如果设置了 `HOMEBREW_TAP_TOKEN` 密钥)
 
 有关 tap 设置,请参阅 [`packaging/homebrew/README.md`](../packaging/homebrew/README.md)。
 
