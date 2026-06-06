@@ -110,7 +110,9 @@ impl UpstreamKind {
 }
 
 /// FastCGI connection address.
-/// Contains `:` → TCP, otherwise → Unix socket path.
+///
+/// Classified as TCP only when the text after the **last** `:` parses as a
+/// `u16` port; everything else is a Unix socket path. See [`FcgiAddress::parse`].
 #[derive(Debug, Clone)]
 pub enum FcgiAddress {
     Tcp(String),
@@ -118,8 +120,45 @@ pub enum FcgiAddress {
 }
 
 impl FcgiAddress {
+    /// Classify a FastCGI upstream address as TCP or a Unix socket path.
+    ///
+    /// The rule is exactly one test, applied to nothing but the text after the
+    /// **last** `:`: it is **TCP** if and only if that trailing segment parses
+    /// as a `u16` port (`127.0.0.1:9000`, `[::1]:9000`, `:9000`); otherwise it
+    /// is a **Unix socket path**. Nothing else is inspected — the host half is
+    /// never validated and brackets are not parsed specially. Cases that fall
+    /// through to Unix:
+    ///
+    /// - a bare host with no port (`localhost`) — a TCP upstream must always
+    ///   be written `host:port`, so a port-less value is taken literally as a
+    ///   socket path;
+    /// - a Windows drive-letter path (`C:\fpm.sock`), whose `:` is not a port
+    ///   separator;
+    /// - a Unix socket path whose last `:`-segment is non-numeric
+    ///   (`/run/with:colon.sock`).
+    ///
+    /// The one residual false positive of the heuristic: a Unix socket path
+    /// whose final `:`-segment *is* a valid `u16` (e.g. `/run/sock:1234`) is
+    /// classified as **TCP**. This is vanishingly rare for real `.sock` paths;
+    /// if you hit it, rename the socket. There is no such ambiguity for a path
+    /// ending in a non-numeric component.
+    ///
+    /// For IPv6 over TCP, use the bracketed `[host]:port` form
+    /// (`[::1]:9000` → TCP because the last segment `9000` parses). The
+    /// brackets are not parsed; they matter only because they push the port
+    /// into the final segment. A bare IPv6 address with no port is resolved by
+    /// the same rule: `::1` ends in `:1` (a valid `u16`) → TCP, whereas
+    /// `[::1]` ends in `1]` → Unix. Always include the port for an IPv6 TCP
+    /// upstream.
+    ///
+    /// This is deliberately a heuristic: parsing is platform-independent (both
+    /// variants exist on every platform); only the connection is
+    /// `#[cfg(unix)]`-gated.
     pub fn parse(addr: &str) -> Self {
-        if addr.contains(':') {
+        let is_tcp = addr
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+        if is_tcp {
             Self::Tcp(addr.to_string())
         } else {
             Self::Unix(addr.to_string())
@@ -218,6 +257,96 @@ mod tests {
         assert!(matches!(kind, UpstreamKind::FastCgi { .. }));
         if let UpstreamKind::FastCgi { address } = kind {
             assert!(matches!(address, FcgiAddress::Unix(_)));
+        }
+    }
+
+    #[test]
+    fn test_fcgi_address_tcp() {
+        // A trailing ":<u16 port>" marks a TCP address, including bracketed
+        // IPv6, a port-only bind, and the u16 boundary values.
+        for addr in [
+            "127.0.0.1:9000",
+            "[::1]:9000",
+            "localhost:8080",
+            ":9000",
+            "host:0",     // port 0 is a valid u16
+            "host:65535", // u16::MAX — upper boundary
+        ] {
+            assert!(
+                matches!(FcgiAddress::parse(addr), FcgiAddress::Tcp(_)),
+                "{addr} should parse as TCP"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fcgi_address_unix() {
+        // No colon, or a colon whose suffix is not a valid u16 port, is a Unix
+        // socket path. This deliberately covers the cases the old
+        // `contains(':')` heuristic misclassified.
+        for addr in [
+            "/var/run/php-fpm.sock", // plain path, no colon
+            "localhost",             // bare host, no port → taken as a path
+            r"C:\fpm.sock",          // Windows drive path, ':' is not a port
+            "/run/with:colon.sock",  // legal Unix path containing ':'
+            "host:",                 // empty port
+            "host:notaport",         // non-numeric port
+            "host:65536",            // just past u16::MAX — exact overflow edge
+            "host:99999",            // out-of-range port (> u16::MAX)
+            "",                      // empty input → empty Unix path
+        ] {
+            assert!(
+                matches!(FcgiAddress::parse(addr), FcgiAddress::Unix(_)),
+                "{addr} should parse as Unix"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fcgi_address_numeric_suffix_path_is_documented_false_positive() {
+        // Documented limitation: a Unix path whose final `:`-segment is a valid
+        // u16 is read as TCP. Pinned so the known sharp edge stays visible and
+        // intentional. Real `.sock` paths end in a non-numeric component and
+        // are unaffected.
+        assert!(
+            matches!(FcgiAddress::parse("/run/sock:1234"), FcgiAddress::Tcp(_)),
+            "a path ending in :<u16> is classified TCP by the last-segment rule"
+        );
+        assert!(
+            matches!(
+                FcgiAddress::parse("/run/php-fpm.sock"),
+                FcgiAddress::Unix(_)
+            ),
+            "a normal .sock path stays Unix"
+        );
+    }
+
+    #[test]
+    fn test_fcgi_address_bare_ipv6_is_documented() {
+        // A bare IPv6 address without a port is ambiguous and resolved by the
+        // same last-segment rule. These assertions pin the documented
+        // behaviour so it stays a deliberate decision, not an accident:
+        // `::1` ends in a numeric segment → TCP; `[::1]` ends in `1]` → Unix.
+        // The canonical, unambiguous form is bracketed-with-port (`[::1]:9000`).
+        assert!(
+            matches!(FcgiAddress::parse("::1"), FcgiAddress::Tcp(_)),
+            "bare ::1 is classified TCP by the last-segment rule"
+        );
+        assert!(
+            matches!(FcgiAddress::parse("[::1]"), FcgiAddress::Unix(_)),
+            "[::1] without a port falls through to Unix"
+        );
+    }
+
+    #[test]
+    fn test_fcgi_address_preserves_value_verbatim() {
+        match FcgiAddress::parse("127.0.0.1:9000") {
+            FcgiAddress::Tcp(a) => assert_eq!(a, "127.0.0.1:9000"),
+            other => panic!("expected Tcp, got {other:?}"),
+        }
+        match FcgiAddress::parse("/run/with:colon.sock") {
+            FcgiAddress::Unix(a) => assert_eq!(a, "/run/with:colon.sock"),
+            other => panic!("expected Unix, got {other:?}"),
         }
     }
 
