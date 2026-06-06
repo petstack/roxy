@@ -7,6 +7,17 @@ use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, Ups
 
 type McpError = rmcp::ErrorData;
 
+/// Hard cap on how many elicitation rounds a single `call_tool` may drive.
+///
+/// Each round re-invokes the upstream with the accumulated answers. A backend
+/// that returns `Elicit` unconditionally — through a bug or malice — would
+/// otherwise spin the loop forever: unbounded client prompts, unbounded growth
+/// of the answer accumulator, and a request that never completes. When the cap
+/// is exceeded `call_tool` aborts with an error. 32 sits comfortably above any
+/// realistic multi-step form while still bounding the blast radius; revisit (or
+/// make configurable) if a legitimate workflow ever needs more.
+const MAX_ELICITATION_ROUNDS: usize = 32;
+
 /// Fill a 36-byte stack buffer with a fresh UUID v4 hyphenated ascii string.
 /// Returns a `&str` borrowed from the caller-supplied buffer so callers can
 /// embed a per-request correlation id in an envelope without allocating.
@@ -17,6 +28,37 @@ pub fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
 
 pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
+}
+
+/// The one client-facing side effect of the `call_tool` elicitation loop:
+/// prompt the MCP client and wait for its answer. Abstracting it behind a
+/// trait lets the bounded loop (`run_tool_loop`) be unit-tested with a stub
+/// client and no live rmcp peer. Production uses [`PeerPrompter`].
+///
+/// Follows the `UpstreamExecutor` convention of an explicit `+ Send` future
+/// rather than `async fn`, because `call_tool` must return a `Send` future.
+trait ElicitationPrompter {
+    fn prompt(
+        &self,
+        params: CreateElicitationRequestParams,
+    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, McpError>> + Send;
+}
+
+/// Production [`ElicitationPrompter`] backed by the live MCP client peer.
+struct PeerPrompter<'p> {
+    peer: &'p rmcp::service::Peer<rmcp::RoleServer>,
+}
+
+impl ElicitationPrompter for PeerPrompter<'_> {
+    async fn prompt(
+        &self,
+        params: CreateElicitationRequestParams,
+    ) -> Result<CreateElicitationResult, McpError> {
+        self.peer.create_elicitation(params).await.map_err(|e| {
+            error!("elicitation request failed: {e}");
+            McpError::internal_error(format!("elicitation failed: {e}"), None)
+        })
+    }
 }
 
 impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
@@ -97,6 +139,159 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             .collect();
 
         Ok((tools, resources, prompts))
+    }
+
+    /// Drive a tool call to completion, bounding the elicitation loop.
+    ///
+    /// Repeatedly invokes the upstream; on each `Elicit` response it prompts
+    /// the client (via `prompter`) and feeds the answer back into the next
+    /// upstream call. The loop is capped at [`MAX_ELICITATION_ROUNDS`], so a
+    /// backend that returns `Elicit` forever cannot spin indefinitely or grow
+    /// `elicitation_results` without bound — on exceed it aborts with an
+    /// internal error. Split out from `call_tool` (which supplies a live
+    /// [`PeerPrompter`]) so the cap can be unit-tested with a stub prompter.
+    async fn run_tool_loop<P: ElicitationPrompter>(
+        &self,
+        request: &CallToolRequestParams,
+        session_id: Option<&str>,
+        request_id: &str,
+        exec_ctx: ExecuteContext<'_>,
+        prompter: &P,
+    ) -> Result<CallToolResult, McpError> {
+        let mut elicitation_results: Vec<serde_json::Value> = Vec::new();
+        let mut elicit_context: Option<serde_json::Value> = None;
+        let mut elicitation_rounds: usize = 0;
+
+        loop {
+            let upstream_request = UpstreamRequest::CallTool {
+                name: &request.name,
+                arguments: request.arguments.as_ref(),
+                elicitation_results: if elicitation_results.is_empty() {
+                    None
+                } else {
+                    Some(&elicitation_results)
+                },
+                context: elicit_context.as_ref(),
+            };
+            let envelope = UpstreamEnvelope {
+                session_id,
+                request_id,
+                request: upstream_request,
+            };
+
+            let response = self
+                .executor
+                .execute(&envelope, exec_ctx)
+                .await
+                .map_err(|e| {
+                    error!("upstream executor error: {e}");
+                    McpError::internal_error(format!("upstream error: {e}"), None)
+                })?;
+
+            match response {
+                UpstreamCallResult::Content(c) => {
+                    let content: Vec<Content> =
+                        c.content.into_iter().map(map_upstream_content).collect();
+
+                    let mut result = CallToolResult::success(content);
+                    if c.structured_content.is_some() {
+                        result.structured_content = c.structured_content;
+                    }
+
+                    return Ok(result);
+                }
+                UpstreamCallResult::Error(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
+                }
+                UpstreamCallResult::Elicit(elicit) => {
+                    // Bound the loop *before* prompting the client again: a
+                    // backend stuck returning `Elicit` must not drive unbounded
+                    // prompts or unbounded `elicitation_results` growth. On
+                    // exceed we abandon the upstream's elicitation context (the
+                    // same as the invalid-schema error path below) rather than
+                    // sending a cancellation notification — that path is for a
+                    // user decision, and mislabeling a roxy policy abort as one
+                    // would be wrong.
+                    elicitation_rounds += 1;
+                    if elicitation_rounds > MAX_ELICITATION_ROUNDS {
+                        error!(
+                            "elicitation exceeded {MAX_ELICITATION_ROUNDS} rounds for tool {}",
+                            request.name
+                        );
+                        return Err(McpError::internal_error(
+                            format!("elicitation exceeded {MAX_ELICITATION_ROUNDS} rounds"),
+                            None,
+                        ));
+                    }
+
+                    let crate::protocol::UpstreamElicitResponse {
+                        message,
+                        schema,
+                        context: elicit_ctx,
+                    } = elicit;
+                    let schema: ElicitationSchema =
+                        serde_json::from_value(schema).map_err(|e| {
+                            error!("invalid elicitation schema from PHP: {e}");
+                            McpError::internal_error(
+                                format!("invalid elicitation schema: {e}"),
+                                None,
+                            )
+                        })?;
+
+                    let params = CreateElicitationRequestParams::FormElicitationParams {
+                        meta: None,
+                        message,
+                        requested_schema: schema,
+                    };
+
+                    let elicit_result = prompter.prompt(params).await?;
+
+                    match elicit_result.action {
+                        ElicitationAction::Accept => {
+                            if let Some(content) = elicit_result.content {
+                                elicitation_results.push(content);
+                            }
+                            elicit_context = elicit_ctx;
+                            // continue loop — re-invoke upstream with results
+                        }
+                        action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
+                            let action_str = match action {
+                                ElicitationAction::Decline => "decline",
+                                ElicitationAction::Cancel => "cancel",
+                                _ => unreachable!(),
+                            };
+
+                            // Notify upstream about cancellation
+                            let cancel_request = UpstreamRequest::ElicitationCancelled {
+                                name: &request.name,
+                                action: action_str,
+                                context: elicit_ctx.as_ref(),
+                            };
+                            let cancel_envelope = UpstreamEnvelope {
+                                session_id,
+                                request_id,
+                                request: cancel_request,
+                            };
+                            if let Err(e) = self.executor.execute(&cancel_envelope, exec_ctx).await
+                            {
+                                warn!(
+                                    "failed to notify upstream about elicitation cancellation: {e}"
+                                );
+                            }
+
+                            let msg = match action {
+                                ElicitationAction::Decline => {
+                                    "User declined to provide information"
+                                }
+                                ElicitationAction::Cancel => "User cancelled the operation",
+                                _ => unreachable!(),
+                            };
+                            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -234,123 +429,11 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
             forward_headers: forward_headers.as_ref(),
         };
 
-        let mut elicitation_results: Vec<serde_json::Value> = Vec::new();
-        let mut elicit_context: Option<serde_json::Value> = None;
-
-        loop {
-            let upstream_request = UpstreamRequest::CallTool {
-                name: &request.name,
-                arguments: request.arguments.as_ref(),
-                elicitation_results: if elicitation_results.is_empty() {
-                    None
-                } else {
-                    Some(&elicitation_results)
-                },
-                context: elicit_context.as_ref(),
-            };
-            let envelope = UpstreamEnvelope {
-                session_id: session_id_ref,
-                request_id,
-                request: upstream_request,
-            };
-
-            let response = self
-                .executor
-                .execute(&envelope, exec_ctx)
-                .await
-                .map_err(|e| {
-                    error!("upstream executor error: {e}");
-                    McpError::internal_error(format!("upstream error: {e}"), None)
-                })?;
-
-            match response {
-                UpstreamCallResult::Content(c) => {
-                    let content: Vec<Content> =
-                        c.content.into_iter().map(map_upstream_content).collect();
-
-                    let mut result = CallToolResult::success(content);
-                    if c.structured_content.is_some() {
-                        result.structured_content = c.structured_content;
-                    }
-
-                    return Ok(result);
-                }
-                UpstreamCallResult::Error(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
-                }
-                UpstreamCallResult::Elicit(elicit) => {
-                    let crate::protocol::UpstreamElicitResponse {
-                        message,
-                        schema,
-                        context: elicit_ctx,
-                    } = elicit;
-                    let schema: ElicitationSchema =
-                        serde_json::from_value(schema).map_err(|e| {
-                            error!("invalid elicitation schema from PHP: {e}");
-                            McpError::internal_error(
-                                format!("invalid elicitation schema: {e}"),
-                                None,
-                            )
-                        })?;
-
-                    let params = CreateElicitationRequestParams::FormElicitationParams {
-                        meta: None,
-                        message,
-                        requested_schema: schema,
-                    };
-
-                    let elicit_result =
-                        context.peer.create_elicitation(params).await.map_err(|e| {
-                            error!("elicitation request failed: {e}");
-                            McpError::internal_error(format!("elicitation failed: {e}"), None)
-                        })?;
-
-                    match elicit_result.action {
-                        ElicitationAction::Accept => {
-                            if let Some(content) = elicit_result.content {
-                                elicitation_results.push(content);
-                            }
-                            elicit_context = elicit_ctx;
-                            // continue loop — re-invoke PHP with results
-                        }
-                        action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
-                            let action_str = match action {
-                                ElicitationAction::Decline => "decline",
-                                ElicitationAction::Cancel => "cancel",
-                                _ => unreachable!(),
-                            };
-
-                            // Notify PHP about cancellation
-                            let cancel_request = UpstreamRequest::ElicitationCancelled {
-                                name: &request.name,
-                                action: action_str,
-                                context: elicit_ctx.as_ref(),
-                            };
-                            let cancel_envelope = UpstreamEnvelope {
-                                session_id: session_id_ref,
-                                request_id,
-                                request: cancel_request,
-                            };
-                            if let Err(e) = self.executor.execute(&cancel_envelope, exec_ctx).await
-                            {
-                                warn!(
-                                    "failed to notify upstream about elicitation cancellation: {e}"
-                                );
-                            }
-
-                            let msg = match action {
-                                ElicitationAction::Decline => {
-                                    "User declined to provide information"
-                                }
-                                ElicitationAction::Cancel => "User cancelled the operation",
-                                _ => unreachable!(),
-                            };
-                            return Ok(CallToolResult::error(vec![Content::text(msg)]));
-                        }
-                    }
-                }
-            }
-        }
+        let prompter = PeerPrompter {
+            peer: &context.peer,
+        };
+        self.run_tool_loop(&request, session_id_ref, request_id, exec_ctx, &prompter)
+            .await
     }
 
     async fn list_resources(
@@ -516,7 +599,12 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{
+        UpstreamContentResponse, UpstreamDiscoverResponse, UpstreamElicitResponse,
+    };
     use http::header::{HeaderMap, HeaderName, HeaderValue};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn is_dropped_header_drops_hop_by_hop() {
@@ -633,5 +721,244 @@ mod tests {
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    // --- Bounded elicitation loop (issue 0002) ---
+
+    /// Scripted upstream for `run_tool_loop` tests: returns `Elicit` for the
+    /// first `elicit_rounds` `CallTool` invocations, then `Content`. Pass
+    /// `usize::MAX` to model a backend that elicits forever. The
+    /// `ElicitationCancelled` notification (not a `CallTool`) is acked with
+    /// empty content. `calls` counts every `CallTool` invocation.
+    struct StubExecutor {
+        calls: Arc<AtomicUsize>,
+        elicit_rounds: usize,
+    }
+
+    impl StubExecutor {
+        /// Returns the executor and a shared handle to its `CallTool` counter.
+        fn new(elicit_rounds: usize) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    calls: Arc::clone(&calls),
+                    elicit_rounds,
+                },
+                calls,
+            )
+        }
+    }
+
+    impl UpstreamExecutor for StubExecutor {
+        async fn execute(
+            &self,
+            request: &UpstreamEnvelope<'_>,
+            _ctx: ExecuteContext<'_>,
+        ) -> anyhow::Result<UpstreamCallResult> {
+            if !matches!(request.request, UpstreamRequest::CallTool { .. }) {
+                // ElicitationCancelled notification — ack and move on.
+                return Ok(UpstreamCallResult::Content(UpstreamContentResponse {
+                    content: vec![],
+                    structured_content: None,
+                }));
+            }
+            let prior = self.calls.fetch_add(1, Ordering::SeqCst);
+            if prior < self.elicit_rounds {
+                Ok(UpstreamCallResult::Elicit(UpstreamElicitResponse {
+                    message: "need more input".to_string(),
+                    // Minimal schema that deserializes into ElicitationSchema so
+                    // the loop reaches the prompt instead of erroring on an
+                    // invalid schema.
+                    schema: serde_json::json!({"type": "object", "properties": {}}),
+                    context: None,
+                }))
+            } else {
+                Ok(UpstreamCallResult::Content(UpstreamContentResponse {
+                    content: vec![UpstreamContent::Text {
+                        text: "done".to_string(),
+                    }],
+                    structured_content: None,
+                }))
+            }
+        }
+
+        async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
+            anyhow::bail!("discover is not exercised by run_tool_loop tests")
+        }
+    }
+
+    /// Stub client prompter: records how many times the client was prompted and
+    /// returns a fixed action (with dummy content for `Accept`).
+    struct StubPrompter {
+        prompts: Arc<AtomicUsize>,
+        action: ElicitationAction,
+    }
+
+    impl StubPrompter {
+        /// Returns the prompter and a shared handle to its prompt counter.
+        fn new(action: ElicitationAction) -> (Self, Arc<AtomicUsize>) {
+            let prompts = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    prompts: Arc::clone(&prompts),
+                    action,
+                },
+                prompts,
+            )
+        }
+    }
+
+    impl ElicitationPrompter for StubPrompter {
+        async fn prompt(
+            &self,
+            _params: CreateElicitationRequestParams,
+        ) -> Result<CreateElicitationResult, McpError> {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            let content = matches!(self.action, ElicitationAction::Accept)
+                .then(|| serde_json::json!({"answer": "yes"}));
+            Ok(CreateElicitationResult {
+                action: self.action.clone(),
+                content,
+            })
+        }
+    }
+
+    fn tool_request(name: &str) -> CallToolRequestParams {
+        let mut request = CallToolRequestParams::default();
+        request.name = name.to_string().into();
+        request
+    }
+
+    /// The core stability guarantee: a backend that returns `Elicit`
+    /// unconditionally is stopped at the cap with an error rather than spinning
+    /// forever. The client is prompted exactly MAX times and the upstream is
+    /// invoked exactly MAX + 1 times (the extra round trips the cap), so neither
+    /// the prompts nor the answer accumulator grow without bound.
+    #[tokio::test]
+    async fn run_tool_loop_caps_runaway_elicitation() {
+        let (executor, calls) = StubExecutor::new(usize::MAX);
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Accept);
+
+        let request = tool_request("loops_forever");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-cap",
+                ExecuteContext::default(),
+                &prompter,
+            )
+            .await;
+
+        let err = result.expect_err("a runaway elicitation must abort with an error");
+        assert!(
+            err.message.contains("exceeded") && err.message.contains("rounds"),
+            "error must name the cap, got: {}",
+            err.message
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            MAX_ELICITATION_ROUNDS,
+            "client must be prompted exactly the cap number of times"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_ELICITATION_ROUNDS + 1,
+            "upstream is invoked once past the cap, then the loop aborts"
+        );
+    }
+
+    /// A legitimate multi-step elicitation under the cap completes normally and
+    /// returns the upstream's content — the cap does not interfere.
+    #[tokio::test]
+    async fn run_tool_loop_completes_within_cap() {
+        let (executor, _calls) = StubExecutor::new(3);
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Accept);
+
+        let request = tool_request("three_steps");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-ok",
+                ExecuteContext::default(),
+                &prompter,
+            )
+            .await
+            .expect("a bounded elicitation flow must succeed");
+
+        assert_eq!(result.is_error, Some(false), "result must be a success");
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            3,
+            "client prompted once per elicitation round"
+        );
+    }
+
+    /// A backend that returns content immediately never prompts the client.
+    #[tokio::test]
+    async fn run_tool_loop_returns_without_elicitation() {
+        let (executor, _calls) = StubExecutor::new(0);
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Accept);
+
+        let request = tool_request("no_elicit");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-direct",
+                ExecuteContext::default(),
+                &prompter,
+            )
+            .await
+            .expect("direct content must succeed");
+
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            0,
+            "no elicitation means no client prompt"
+        );
+    }
+
+    /// When the user declines, the loop stops immediately with an error result
+    /// (not a transport error) — proving decline short-circuits well before the
+    /// cap and the loop has more than one exit.
+    #[tokio::test]
+    async fn run_tool_loop_stops_on_decline() {
+        let (executor, calls) = StubExecutor::new(usize::MAX);
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Decline);
+
+        let request = tool_request("declined");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-decline",
+                ExecuteContext::default(),
+                &prompter,
+            )
+            .await
+            .expect("decline yields an error result, not a transport error");
+
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "decline maps to an error result"
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "user is prompted exactly once"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no further CallTool after decline"
+        );
     }
 }
