@@ -91,7 +91,13 @@ pub enum UpstreamKind {
 
 impl UpstreamKind {
     pub fn parse(upstream: &str) -> Self {
-        if upstream.starts_with("http://") || upstream.starts_with("https://") {
+        // URL schemes are case-insensitive (RFC 3986 §3.1), so compare the
+        // scheme — the part before "://" — without regard to case. The
+        // original `upstream` string is kept verbatim for the URL value.
+        let is_http = upstream.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        });
+        if is_http {
             Self::Http {
                 url: upstream.to_string(),
             }
@@ -159,6 +165,42 @@ mod tests {
     fn test_upstream_kind_https() {
         let kind = UpstreamKind::parse("https://api.example.com/mcp");
         assert!(matches!(kind, UpstreamKind::Http { .. }));
+    }
+
+    #[test]
+    fn test_upstream_kind_http_mixed_case_scheme() {
+        // URL schemes are case-insensitive (RFC 3986 §3.1): mixed-case
+        // schemes must still route to the HTTP executor, and the original
+        // URL string must be preserved verbatim.
+        for upstream in [
+            "HTTP://host/x",
+            "HtTpS://host/x",
+            "Http://localhost:8000/handler",
+            "HTTPS://api.example.com/mcp",
+        ] {
+            let kind = UpstreamKind::parse(upstream);
+            assert!(
+                matches!(kind, UpstreamKind::Http { .. }),
+                "{upstream} should route to HTTP"
+            );
+            if let UpstreamKind::Http { url } = kind {
+                assert_eq!(url, upstream, "URL value must be kept verbatim");
+            }
+        }
+    }
+
+    #[test]
+    fn test_upstream_kind_scheme_must_be_full_prefix() {
+        // The scheme must be the whole segment before "://", not merely a
+        // substring of it. A non-HTTP scheme that happens to contain "http"
+        // must still route to FastCGI — this pins the equivalence to an
+        // anchored, case-insensitive `starts_with`.
+        for upstream in ["xhttp://host", "ftp://host", "shttps://host"] {
+            assert!(
+                matches!(UpstreamKind::parse(upstream), UpstreamKind::FastCgi { .. }),
+                "{upstream} should route to FastCGI"
+            );
+        }
     }
 
     #[test]
