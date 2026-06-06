@@ -324,6 +324,8 @@ where
 /// Generic over the future's output so the concrete `fastcgi_client::Response`
 /// / `ClientError` types stay encapsulated and both the TCP and Unix arms share
 /// one implementation.
+#[must_use = "the request result must be routed through detach_on_error so a \
+              timed-out connection is discarded, not recycled"]
 async fn execute_with_timeout<F, T, E>(timeout: Duration, fut: F) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = Result<T, E>>,
@@ -345,6 +347,8 @@ where
 /// This is necessary because `recycle()` cannot detect a stale keep-alive
 /// socket without actually issuing a request — the only reliable signal
 /// of brokenness is a failing `execute()` call.
+#[must_use = "dropping the returned Result loses both the error and the \
+              pool-slot accounting this function performs"]
 fn detach_on_error<M, T, E>(obj: managed::Object<M>, result: Result<T, E>) -> Result<T, E>
 where
     M: managed::Manager,
@@ -392,6 +396,28 @@ impl UpstreamExecutor for FastCgiExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shared counting pool manager for tests that assert connection
+    /// (non-)reuse. `create()` hands out a monotonically increasing id and
+    /// bumps `created`, so a test can tell whether the next `get()` reused a
+    /// pooled connection (count unchanged) or built a fresh one (count + 1).
+    struct CountingManager(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl deadpool::managed::Manager for CountingManager {
+        type Type = usize;
+        type Error = std::io::Error;
+
+        async fn create(&self) -> Result<usize, std::io::Error> {
+            Ok(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        }
+        async fn recycle(
+            &self,
+            _obj: &mut usize,
+            _metrics: &deadpool::managed::Metrics,
+        ) -> deadpool::managed::RecycleResult<std::io::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_body_start_offset_with_headers() {
@@ -675,30 +701,12 @@ mod tests {
     /// next get().
     #[tokio::test]
     async fn test_detach_on_error_forces_new_connection() {
-        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+        use deadpool::managed::Pool;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        struct MockManager(Arc<AtomicUsize>);
-        impl Manager for MockManager {
-            type Type = usize;
-            type Error = std::io::Error;
-
-            async fn create(&self) -> Result<usize, std::io::Error> {
-                let id = self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(id)
-            }
-            async fn recycle(
-                &self,
-                _obj: &mut usize,
-                _metrics: &Metrics,
-            ) -> RecycleResult<std::io::Error> {
-                Ok(())
-            }
-        }
-
         let created = Arc::new(AtomicUsize::new(0));
-        let pool: Pool<MockManager> = Pool::builder(MockManager(Arc::clone(&created)))
+        let pool: Pool<CountingManager> = Pool::builder(CountingManager(Arc::clone(&created)))
             .max_size(1)
             .build()
             .unwrap();
@@ -732,25 +740,24 @@ mod tests {
     /// configured budget rather than blocking forever. A future that sleeps
     /// far longer than the timeout models PHP-FPM accepting the connection and
     /// then stalling mid-request (the exact hang surface this issue closes).
-    #[tokio::test]
+    ///
+    /// `start_paused` runs the test on Tokio's mock clock: the 1-hour sleep and
+    /// the 50ms timeout are virtual, so the test is instant and deterministic
+    /// (no wall-clock dependence or CI jitter) yet still proves the timeout
+    /// fires before the request would have completed.
+    #[tokio::test(start_paused = true)]
     async fn execute_with_timeout_fires_on_hung_request() {
         let hung = async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             Ok::<(), std::io::Error>(())
         };
 
-        let start = std::time::Instant::now();
         let result = execute_with_timeout(Duration::from_millis(50), hung).await;
-        let elapsed = start.elapsed();
 
         assert!(result.is_err(), "a hung request must return an error");
         assert!(
             result.unwrap_err().to_string().contains("timed out"),
             "error message must identify the timeout"
-        );
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "execute must honor the request budget, took {elapsed:?}"
         );
     }
 
@@ -785,32 +792,16 @@ mod tests {
     /// request was never completed) and reusing it would corrupt the next
     /// request. We pair `execute_with_timeout` (Err) with `detach_on_error`
     /// over a counting mock pool and prove the next acquisition builds a fresh
-    /// connection instead of recycling the poisoned one.
-    #[tokio::test]
+    /// connection instead of recycling the poisoned one. `start_paused` keeps
+    /// the simulated timeout virtual and the test deterministic.
+    #[tokio::test(start_paused = true)]
     async fn timed_out_request_detaches_connection() {
-        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+        use deadpool::managed::Pool;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        struct MockManager(Arc<AtomicUsize>);
-        impl Manager for MockManager {
-            type Type = usize;
-            type Error = std::io::Error;
-
-            async fn create(&self) -> Result<usize, std::io::Error> {
-                Ok(self.0.fetch_add(1, Ordering::SeqCst))
-            }
-            async fn recycle(
-                &self,
-                _obj: &mut usize,
-                _metrics: &Metrics,
-            ) -> RecycleResult<std::io::Error> {
-                Ok(())
-            }
-        }
-
         let created = Arc::new(AtomicUsize::new(0));
-        let pool: Pool<MockManager> = Pool::builder(MockManager(Arc::clone(&created)))
+        let pool: Pool<CountingManager> = Pool::builder(CountingManager(Arc::clone(&created)))
             .max_size(1)
             .build()
             .unwrap();
