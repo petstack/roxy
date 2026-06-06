@@ -392,6 +392,57 @@ fn map_upstream_content(item: UpstreamContent) -> Content {
     }
 }
 
+/// Map upstream content to MCP [`ResourceContents`] for a resource read.
+///
+/// `ResourceContents` has only text and blob variants — there is no link
+/// shape — so a [`UpstreamContent::ResourceLink`] is surfaced as text content
+/// that drops nothing:
+///
+/// - the contents carry the link's **own** `uri` (so a client can follow it);
+/// - the link's `mime_type`, when present, is set on the typed `mime_type`
+///   field where a client expects it (not only in the body);
+/// - the body is a human-readable summary listing every populated field
+///   (`name`, `title`, `description`, `mime_type`).
+///
+/// The body is presentational, not a stable parse target — clients should read
+/// the URI and MIME type from the typed fields. Plain text content keeps
+/// `fallback_uri` (the requested resource URI) as before.
+fn map_upstream_resource_content(item: UpstreamContent, fallback_uri: &str) -> ResourceContents {
+    match item {
+        UpstreamContent::Text { text } => ResourceContents::text(text, fallback_uri.to_string()),
+        UpstreamContent::ResourceLink {
+            uri,
+            name,
+            title,
+            description,
+            mime_type,
+        } => {
+            let mut body = format!("Resource link: {name}\nURI: {uri}");
+            if let Some(t) = &title {
+                body.push_str("\nTitle: ");
+                body.push_str(t);
+            }
+            if let Some(d) = &description {
+                body.push_str("\nDescription: ");
+                body.push_str(d);
+            }
+            if let Some(m) = &mime_type {
+                body.push_str("\nMIME type: ");
+                body.push_str(m);
+            }
+            // The contents URI is the link target itself, so a client can
+            // follow it — not the placeholder string this used to emit. Carry
+            // the link's real MIME type on the typed field too, rather than
+            // leaving the `text` default that `ResourceContents::text` sets.
+            let contents = ResourceContents::text(body, uri);
+            match mime_type {
+                Some(m) => contents.with_mime_type(m),
+                None => contents,
+            }
+        }
+    }
+}
+
 impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -488,15 +539,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                 let contents: Vec<ResourceContents> = c
                     .content
                     .into_iter()
-                    .map(|item| match item {
-                        UpstreamContent::Text { text } => {
-                            ResourceContents::text(text, request.uri.clone())
-                        }
-                        UpstreamContent::ResourceLink { .. } => ResourceContents::text(
-                            "[resource link]".to_string(),
-                            request.uri.clone(),
-                        ),
-                    })
+                    .map(|item| map_upstream_resource_content(item, &request.uri))
                     .collect();
                 Ok(ReadResourceResult::new(contents))
             }
@@ -700,6 +743,89 @@ mod tests {
         let incoming = HeaderMap::new();
         let filtered = filter_forward_headers(&incoming);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn map_upstream_resource_content_preserves_resource_link() {
+        // Regression for #0005: a resource-link read response must carry the
+        // link's real URI and drop none of its metadata, not collapse to the
+        // old "[resource link]" placeholder.
+        let item = UpstreamContent::ResourceLink {
+            uri: "roxy://docs/readme".to_string(),
+            name: "readme".to_string(),
+            title: Some("README".to_string()),
+            description: Some("project intro".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+        };
+
+        let contents = map_upstream_resource_content(item, "roxy://requested");
+
+        match contents {
+            ResourceContents::TextResourceContents {
+                uri,
+                text,
+                mime_type,
+                ..
+            } => {
+                // The contents URI is the link target, not the requested URI
+                // and not a placeholder.
+                assert_eq!(uri, "roxy://docs/readme");
+                assert_ne!(text, "[resource link]");
+                // The link's real MIME type lives on the typed field, not just
+                // in the prose body.
+                assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+                // Every field survives in the body.
+                assert!(text.contains("roxy://docs/readme"), "uri: {text}");
+                assert!(text.contains("readme"), "name: {text}");
+                assert!(text.contains("README"), "title: {text}");
+                assert!(text.contains("project intro"), "description: {text}");
+                assert!(text.contains("text/markdown"), "mime_type: {text}");
+            }
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_upstream_resource_content_omits_absent_link_fields() {
+        // Only the required fields are present; optional ones must not leak
+        // empty labels into the body.
+        let item = UpstreamContent::ResourceLink {
+            uri: "roxy://x".to_string(),
+            name: "x".to_string(),
+            title: None,
+            description: None,
+            mime_type: None,
+        };
+
+        match map_upstream_resource_content(item, "roxy://requested") {
+            ResourceContents::TextResourceContents { uri, text, .. } => {
+                assert_eq!(uri, "roxy://x");
+                assert!(text.contains("roxy://x"));
+                assert!(!text.contains("Title:"), "no empty title label: {text}");
+                assert!(
+                    !text.contains("Description:"),
+                    "no empty description label: {text}"
+                );
+                assert!(!text.contains("MIME type:"), "no empty mime label: {text}");
+            }
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_upstream_resource_content_text_uses_fallback_uri() {
+        // Plain text content is unchanged: it keeps the requested resource URI.
+        let item = UpstreamContent::Text {
+            text: "hello".to_string(),
+        };
+
+        match map_upstream_resource_content(item, "roxy://requested") {
+            ResourceContents::TextResourceContents { uri, text, .. } => {
+                assert_eq!(uri, "roxy://requested");
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected text contents, got {other:?}"),
+        }
     }
 
     #[test]
