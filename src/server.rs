@@ -35,8 +35,11 @@ pub struct RoxyServer<E: UpstreamExecutor> {
 /// trait lets the bounded loop (`run_tool_loop`) be unit-tested with a stub
 /// client and no live rmcp peer. Production uses [`PeerPrompter`].
 ///
-/// Follows the `UpstreamExecutor` convention of an explicit `+ Send` future
-/// rather than `async fn`, because `call_tool` must return a `Send` future.
+/// Follows the `UpstreamExecutor` convention: the trait *declaration* spells
+/// out an explicit `+ Send` future (a bare `async fn` in a trait cannot express
+/// the `Send` bound that `call_tool`'s returned future requires), while
+/// implementors may still write the method as an ordinary `async fn` — the
+/// compiler verifies each impl's future is `Send` against this bound.
 trait ElicitationPrompter {
     fn prompt(
         &self,
@@ -255,10 +258,18 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                             // continue loop — re-invoke upstream with results
                         }
                         action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
-                            let action_str = match action {
-                                ElicitationAction::Decline => "decline",
-                                ElicitationAction::Cancel => "cancel",
-                                _ => unreachable!(),
+                            // Single match over the two terminal actions yields
+                            // both the upstream wire token and the client-facing
+                            // message — no `unreachable!()` arms to drift out of
+                            // sync if `ElicitationAction` ever grows a variant.
+                            let (action_str, msg) = match action {
+                                ElicitationAction::Decline => {
+                                    ("decline", "User declined to provide information")
+                                }
+                                ElicitationAction::Cancel => {
+                                    ("cancel", "User cancelled the operation")
+                                }
+                                ElicitationAction::Accept => unreachable!("guarded by outer arm"),
                             };
 
                             // Notify upstream about cancellation
@@ -279,13 +290,6 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                                 );
                             }
 
-                            let msg = match action {
-                                ElicitationAction::Decline => {
-                                    "User declined to provide information"
-                                }
-                                ElicitationAction::Cancel => "User cancelled the operation",
-                                _ => unreachable!(),
-                            };
                             return Ok(CallToolResult::error(vec![Content::text(msg)]));
                         }
                     }
@@ -924,31 +928,46 @@ mod tests {
         );
     }
 
-    /// When the user declines, the loop stops immediately with an error result
-    /// (not a transport error) — proving decline short-circuits well before the
-    /// cap and the loop has more than one exit.
-    #[tokio::test]
-    async fn run_tool_loop_stops_on_decline() {
+    /// Concatenate the text content of a tool result, for asserting the
+    /// client-facing message.
+    fn result_text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Shared body for the two terminal-action tests. A backend that would
+    /// elicit forever is short-circuited by the user's `action` on the very
+    /// first prompt: the loop returns an error *result* (not a transport
+    /// error), surfaces the action-specific message, and stops calling the
+    /// upstream — proving the cap is not the loop's only exit.
+    async fn assert_terminal_action(action: ElicitationAction, expected_msg_fragment: &str) {
         let (executor, calls) = StubExecutor::new(usize::MAX);
         let server = RoxyServer::new(executor);
-        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Decline);
+        let (prompter, prompts) = StubPrompter::new(action);
 
-        let request = tool_request("declined");
+        let request = tool_request("terminated");
         let result = server
             .run_tool_loop(
                 &request,
                 None,
-                "req-decline",
+                "req-terminal",
                 ExecuteContext::default(),
                 &prompter,
             )
             .await
-            .expect("decline yields an error result, not a transport error");
+            .expect("a terminal action yields an error result, not a transport error");
 
-        assert_eq!(
-            result.is_error,
-            Some(true),
-            "decline maps to an error result"
+        assert_eq!(result.is_error, Some(true), "must map to an error result");
+        assert!(
+            result_text(&result)
+                .to_lowercase()
+                .contains(expected_msg_fragment),
+            "message must reflect the action, got: {}",
+            result_text(&result)
         );
         assert_eq!(
             prompts.load(Ordering::SeqCst),
@@ -958,7 +977,17 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "no further CallTool after decline"
+            "no further CallTool after a terminal action"
         );
+    }
+
+    #[tokio::test]
+    async fn run_tool_loop_stops_on_decline() {
+        assert_terminal_action(ElicitationAction::Decline, "declined").await;
+    }
+
+    #[tokio::test]
+    async fn run_tool_loop_stops_on_cancel() {
+        assert_terminal_action(ElicitationAction::Cancel, "cancelled").await;
     }
 }
