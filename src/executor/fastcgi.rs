@@ -164,6 +164,14 @@ pub struct FastCgiExecutor {
     script_filename: String,
     script_name: String,
     request_uri: String,
+    /// Maximum time a single FastCGI request may run before roxy gives up
+    /// and detaches the connection. Wraps the `conn.execute(...)` future,
+    /// so a PHP-FPM worker that accepts the connection but then hangs
+    /// (slow script, blocked DB call, deadlock) cannot stall the calling
+    /// MCP client forever or pin a pool slot permanently. Mirrors the HTTP
+    /// executor, where `--upstream-timeout` is `reqwest`'s overall request
+    /// timeout (`http.rs`).
+    request_timeout: Duration,
     /// Maximum time to wait for a free connection from the pool.
     /// Without this, `deadpool::managed::Pool::get` blocks forever
     /// when every slot is busy, turning a saturated pool into an
@@ -176,6 +184,7 @@ impl FastCgiExecutor {
         address: &FcgiAddress,
         script_filename: String,
         pool_size: usize,
+        request_timeout: Duration,
         pool_wait_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let script_name = derive_script_name(&script_filename);
@@ -216,6 +225,7 @@ impl FastCgiExecutor {
             script_filename,
             script_name,
             request_uri,
+            request_timeout,
             pool_wait_timeout,
         })
     }
@@ -240,20 +250,22 @@ impl FastCgiExecutor {
             FcgiPool::Tcp(pool) => {
                 let mut conn = acquire(pool, self.pool_wait_timeout).await?;
                 debug!("sending FastCGI request via TCP");
-                let res = conn
-                    .execute(Request::new(params, io::Cursor::new(body)))
-                    .await
-                    .map_err(anyhow::Error::from);
+                let res = execute_with_timeout(
+                    self.request_timeout,
+                    conn.execute(Request::new(params, io::Cursor::new(body))),
+                )
+                .await;
                 detach_on_error(conn, res)?
             }
             #[cfg(unix)]
             FcgiPool::Unix(pool) => {
                 let mut conn = acquire(pool, self.pool_wait_timeout).await?;
                 debug!("sending FastCGI request via Unix socket");
-                let res = conn
-                    .execute(Request::new(params, io::Cursor::new(body)))
-                    .await
-                    .map_err(anyhow::Error::from);
+                let res = execute_with_timeout(
+                    self.request_timeout,
+                    conn.execute(Request::new(params, io::Cursor::new(body))),
+                )
+                .await;
                 detach_on_error(conn, res)?
             }
         };
@@ -298,6 +310,30 @@ where
         Err(_) => Err(anyhow::anyhow!(
             "FastCGI pool exhausted: no free connection within {:?}",
             wait
+        )),
+    }
+}
+
+/// Run a FastCGI `execute` future under a hard wall-clock budget. PHP-FPM may
+/// accept the connection and then hang mid-request (slow script, blocked DB
+/// call, deadlock); without this cap roxy would await that connection forever,
+/// stalling the MCP client and pinning a pool slot permanently. On elapse this
+/// returns an `Err` — the caller routes it through `detach_on_error` so the
+/// half-spoken (mid-protocol) connection is discarded instead of recycled.
+///
+/// Generic over the future's output so the concrete `fastcgi_client::Response`
+/// / `ClientError` types stay encapsulated and both the TCP and Unix arms share
+/// one implementation.
+async fn execute_with_timeout<F, T, E>(timeout: Duration, fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow::anyhow!(
+            "FastCGI request timed out after {timeout:?}"
         )),
     }
 }
@@ -426,8 +462,14 @@ mod tests {
     fn executor_new_derives_cgi_fields_from_entrypoint() {
         let addr = FcgiAddress::Tcp("127.0.0.1:0".to_string());
         let entrypoint = "/var/www/bookings/api.php".to_string();
-        let ex =
-            FastCgiExecutor::new(&addr, entrypoint.clone(), 1, Duration::from_secs(30)).unwrap();
+        let ex = FastCgiExecutor::new(
+            &addr,
+            entrypoint.clone(),
+            1,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert_eq!(
             ex.script_filename, entrypoint,
             "SCRIPT_FILENAME must be byte-for-byte"
@@ -683,6 +725,114 @@ mod tests {
             created.load(Ordering::SeqCst),
             2,
             "detach_on_error must prevent a broken connection from being reused"
+        );
+    }
+
+    /// A hung FastCGI request must surface as a timeout error within the
+    /// configured budget rather than blocking forever. A future that sleeps
+    /// far longer than the timeout models PHP-FPM accepting the connection and
+    /// then stalling mid-request (the exact hang surface this issue closes).
+    #[tokio::test]
+    async fn execute_with_timeout_fires_on_hung_request() {
+        let hung = async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok::<(), std::io::Error>(())
+        };
+
+        let start = std::time::Instant::now();
+        let result = execute_with_timeout(Duration::from_millis(50), hung).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "a hung request must return an error");
+        assert!(
+            result.unwrap_err().to_string().contains("timed out"),
+            "error message must identify the timeout"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "execute must honor the request budget, took {elapsed:?}"
+        );
+    }
+
+    /// A request that completes inside the budget passes its value through
+    /// untouched — the timeout wrapper is invisible on the happy path.
+    #[tokio::test]
+    async fn execute_with_timeout_passes_through_success() {
+        let ok = async { Ok::<u32, std::io::Error>(42) };
+        let result = execute_with_timeout(Duration::from_secs(30), ok).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    /// A request that fails for a non-timeout reason (e.g. a broken socket)
+    /// still propagates as an error, not swallowed by the wrapper.
+    #[tokio::test]
+    async fn execute_with_timeout_passes_through_error() {
+        let failed = async { Err::<u32, _>(std::io::Error::other("connection reset")) };
+        let result = execute_with_timeout(Duration::from_secs(30), failed).await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("connection reset"),
+            "underlying error must propagate, got: {err}"
+        );
+        assert!(
+            !err.contains("timed out"),
+            "a real error must not be mislabeled as a timeout"
+        );
+    }
+
+    /// The end-to-end contract from the issue: a timed-out connection must NOT
+    /// go back into the pool. The connection is mid-protocol (the FastCGI
+    /// request was never completed) and reusing it would corrupt the next
+    /// request. We pair `execute_with_timeout` (Err) with `detach_on_error`
+    /// over a counting mock pool and prove the next acquisition builds a fresh
+    /// connection instead of recycling the poisoned one.
+    #[tokio::test]
+    async fn timed_out_request_detaches_connection() {
+        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct MockManager(Arc<AtomicUsize>);
+        impl Manager for MockManager {
+            type Type = usize;
+            type Error = std::io::Error;
+
+            async fn create(&self) -> Result<usize, std::io::Error> {
+                Ok(self.0.fetch_add(1, Ordering::SeqCst))
+            }
+            async fn recycle(
+                &self,
+                _obj: &mut usize,
+                _metrics: &Metrics,
+            ) -> RecycleResult<std::io::Error> {
+                Ok(())
+            }
+        }
+
+        let created = Arc::new(AtomicUsize::new(0));
+        let pool: Pool<MockManager> = Pool::builder(MockManager(Arc::clone(&created)))
+            .max_size(1)
+            .build()
+            .unwrap();
+
+        // Acquire the single connection, then simulate a hung request on it.
+        let conn = pool.get().await.unwrap();
+        let hung = async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok::<(), std::io::Error>(())
+        };
+        let res = execute_with_timeout(Duration::from_millis(50), hung).await;
+        assert!(res.is_err(), "the request must time out");
+
+        // Routing the timeout through detach_on_error must discard the
+        // mid-protocol connection rather than recycle it.
+        let _ = detach_on_error(conn, res);
+
+        drop(pool.get().await.unwrap());
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            2,
+            "a timed-out connection must not be reused"
         );
     }
 }
