@@ -30,6 +30,10 @@ anyhow = "1"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 temp-env = "0.3"
+# `test-util` enables Tokio's mock clock (`#[tokio::test(start_paused = true)]`)
+# so timeout tests advance time instantly and deterministically. Dev-only —
+# feature unification keeps it out of the shipped binary's `tokio`.
+tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
 name = "parse"

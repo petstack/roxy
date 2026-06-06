@@ -73,11 +73,20 @@ async fn main() -> anyhow::Result<()> {
             }
 
             info!("using FastCGI executor → {}", config.upstream);
+            // `--upstream-timeout` is the per-request execution budget, matching
+            // the HTTP executor (reqwest's overall request timeout). The
+            // pool-wait budget is derived from the same value: each phase is
+            // independently bounded, so a fully saturated pool fronting a hung
+            // upstream errors out after at most ~2× the configured timeout
+            // (pool-wait, then request). In the common case a connection is
+            // free immediately and only the request budget applies.
+            let timeout = std::time::Duration::from_secs(config.upstream_timeout);
             let executor = Arc::new(FastCgiExecutor::new(
                 &address,
                 entrypoint,
                 config.pool_size,
-                std::time::Duration::from_secs(config.upstream_timeout),
+                timeout,
+                timeout,
             )?);
             run(executor, &config).await
         }
