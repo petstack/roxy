@@ -401,6 +401,7 @@ mod tests {
     /// (non-)reuse. `create()` hands out a monotonically increasing id and
     /// bumps `created`, so a test can tell whether the next `get()` reused a
     /// pooled connection (count unchanged) or built a fresh one (count + 1).
+    #[derive(Debug)]
     struct CountingManager(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     impl deadpool::managed::Manager for CountingManager {
@@ -649,46 +650,31 @@ mod tests {
     /// test; the second acquire must fail within the configured wait
     /// budget. Guards against regressing to the unbounded `pool.get()`
     /// call that made roxy hang when every FastCGI slot was busy.
-    #[tokio::test]
+    /// `start_paused` virtualizes the 50ms wait budget so the test is instant
+    /// and deterministic: with the only slot held, `pool.get()` stays pending
+    /// and the mock clock advances straight to the timeout deadline.
+    #[tokio::test(start_paused = true)]
     async fn acquire_times_out_when_pool_saturated() {
-        use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+        use deadpool::managed::Pool;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
 
-        #[derive(Debug)]
-        struct MockManager;
-        impl Manager for MockManager {
-            type Type = ();
-            type Error = std::io::Error;
-
-            async fn create(&self) -> Result<(), std::io::Error> {
-                Ok(())
-            }
-            async fn recycle(
-                &self,
-                _obj: &mut (),
-                _metrics: &Metrics,
-            ) -> RecycleResult<std::io::Error> {
-                Ok(())
-            }
-        }
-
-        let pool: Pool<MockManager> = Pool::builder(MockManager).max_size(1).build().unwrap();
+        let pool: Pool<CountingManager> =
+            Pool::builder(CountingManager(Arc::new(AtomicUsize::new(0))))
+                .max_size(1)
+                .build()
+                .unwrap();
 
         // Hold the only slot for the entire test.
         let _held = pool.get().await.unwrap();
 
-        let start = std::time::Instant::now();
         let result = acquire(&pool, Duration::from_millis(50)).await;
-        let elapsed = start.elapsed();
 
         assert!(result.is_err(), "saturated pool must return an error");
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("pool exhausted"),
             "expected 'pool exhausted' in error, got: {err_msg}"
-        );
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "acquire must honor the wait budget, took {elapsed:?}"
         );
     }
 
