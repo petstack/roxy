@@ -96,17 +96,8 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             .resources
             .into_iter()
             .map(|r| {
-                let mut raw = RawResource::new(r.uri, r.name);
-                if let Some(title) = r.title {
-                    raw = raw.with_title(title);
-                }
-                if let Some(desc) = r.description {
-                    raw.description = Some(desc);
-                }
-                if let Some(mime) = r.mime_type {
-                    raw.mime_type = Some(mime);
-                }
-                raw.no_annotation()
+                build_raw_resource(r.uri, r.name, r.title, r.description, r.mime_type)
+                    .no_annotation()
             })
             .collect();
 
@@ -367,6 +358,32 @@ fn extract_forward_headers(
     Some(filter_forward_headers(&parts.headers))
 }
 
+/// Build a `RawResource` from upstream resource-link fields, applying the
+/// optional `title` / `description` / `mime_type` uniformly. Centralizes the
+/// construction that was otherwise duplicated across `discover`,
+/// `map_upstream_content`, and `get_prompt` (issue 0014). Returns the
+/// un-annotated `RawResource`; callers that need an annotated `Resource`
+/// finish with `.no_annotation()`.
+fn build_raw_resource(
+    uri: String,
+    name: String,
+    title: Option<String>,
+    description: Option<String>,
+    mime_type: Option<String>,
+) -> RawResource {
+    let mut raw = RawResource::new(uri, name);
+    if let Some(title) = title {
+        raw = raw.with_title(title);
+    }
+    if let Some(description) = description {
+        raw.description = Some(description);
+    }
+    if let Some(mime_type) = mime_type {
+        raw.mime_type = Some(mime_type);
+    }
+    raw
+}
+
 fn map_upstream_content(item: UpstreamContent) -> Content {
     match item {
         UpstreamContent::Text { text } => Content::text(text),
@@ -376,19 +393,7 @@ fn map_upstream_content(item: UpstreamContent) -> Content {
             title,
             description,
             mime_type,
-        } => {
-            let mut raw = RawResource::new(uri, name);
-            if let Some(t) = title {
-                raw = raw.with_title(t);
-            }
-            if let Some(d) = description {
-                raw.description = Some(d);
-            }
-            if let Some(m) = mime_type {
-                raw.mime_type = Some(m);
-            }
-            Content::resource_link(raw)
-        }
+        } => Content::resource_link(build_raw_resource(uri, name, title, description, mime_type)),
     }
 }
 
@@ -571,22 +576,11 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             title,
                             description,
                             mime_type,
-                        } => {
-                            let mut raw = RawResource::new(uri, name);
-                            if let Some(t) = title {
-                                raw = raw.with_title(t);
-                            }
-                            if let Some(d) = description {
-                                raw.description = Some(d);
-                            }
-                            if let Some(m) = mime_type {
-                                raw.mime_type = Some(m);
-                            }
-                            PromptMessage::new_resource_link(
-                                PromptMessageRole::Assistant,
-                                raw.no_annotation(),
-                            )
-                        }
+                        } => PromptMessage::new_resource_link(
+                            PromptMessageRole::Assistant,
+                            build_raw_resource(uri, name, title, description, mime_type)
+                                .no_annotation(),
+                        ),
                     })
                     .collect();
                 Ok(GetPromptResult::new(messages))
@@ -725,6 +719,42 @@ mod tests {
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    // --- RawResource construction helper (issue 0014) ---
+
+    #[test]
+    fn build_raw_resource_sets_all_optional_fields() {
+        let raw = build_raw_resource(
+            "file:///a.txt".to_string(),
+            "a.txt".to_string(),
+            Some("Title".to_string()),
+            Some("Desc".to_string()),
+            Some("text/plain".to_string()),
+        );
+
+        assert_eq!(raw.uri, "file:///a.txt");
+        assert_eq!(raw.name, "a.txt");
+        assert_eq!(raw.title.as_deref(), Some("Title"));
+        assert_eq!(raw.description.as_deref(), Some("Desc"));
+        assert_eq!(raw.mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn build_raw_resource_leaves_optional_fields_unset_when_none() {
+        let raw = build_raw_resource(
+            "file:///b.bin".to_string(),
+            "b.bin".to_string(),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(raw.uri, "file:///b.bin");
+        assert_eq!(raw.name, "b.bin");
+        assert!(raw.title.is_none());
+        assert!(raw.description.is_none());
+        assert!(raw.mime_type.is_none());
     }
 
     // --- Bounded elicitation loop (issue 0002) ---
