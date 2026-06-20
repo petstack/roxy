@@ -29,22 +29,29 @@ fn merge_forward_headers(
     static_headers: &reqwest::header::HeaderMap,
     forward: Option<&http::HeaderMap>,
 ) -> reqwest::header::HeaderMap {
+    // Fast path: under `--transport stdio`, or for any client request with
+    // nothing forwardable, `forward` is `None`. `reqwest` needs an owned
+    // `HeaderMap`, so a clone of the static set is unavoidable — but we
+    // return it directly and skip the `keys()` / `get_all()` iteration and
+    // loop setup entirely. This is the common case on the hot path.
+    let Some(extra) = forward else {
+        return static_headers.clone();
+    };
+
     let mut out = static_headers.clone();
-    if let Some(extra) = forward {
-        for name in extra.keys() {
-            let mut values = extra.get_all(name).iter();
-            // `insert` removes every existing entry for this name
-            // (including any static entry we just cloned) and places
-            // the first forward value. This is the "forward replaces
-            // static on collision" semantic from the spec.
-            if let Some(first) = values.next() {
-                out.insert(name.clone(), first.clone());
-            }
-            // Any remaining values for the same name are appended so
-            // multi-valued forward headers survive the merge.
-            for rest in values {
-                out.append(name.clone(), rest.clone());
-            }
+    for name in extra.keys() {
+        let mut values = extra.get_all(name).iter();
+        // `insert` removes every existing entry for this name
+        // (including any static entry we just cloned) and places
+        // the first forward value. This is the "forward replaces
+        // static on collision" semantic from the spec.
+        if let Some(first) = values.next() {
+            out.insert(name.clone(), first.clone());
+        }
+        // Any remaining values for the same name are appended so
+        // multi-valued forward headers survive the merge.
+        for rest in values {
+            out.append(name.clone(), rest.clone());
         }
     }
     out
@@ -213,6 +220,9 @@ mod tests {
 
     #[test]
     fn merge_forward_headers_returns_static_when_forward_is_none() {
+        // Exercises the `forward == None` fast path: the returned map must
+        // equal the static set, and — since `reqwest` takes ownership — it
+        // must be an independent clone, not an alias of the input.
         use http::header::{HeaderMap, HeaderName, HeaderValue};
 
         let mut static_headers = HeaderMap::new();
@@ -225,11 +235,20 @@ mod tests {
             HeaderValue::from_static("roxy"),
         );
 
-        let merged = merge_forward_headers(&static_headers, None);
+        let mut merged = merge_forward_headers(&static_headers, None);
 
         assert_eq!(merged.len(), 2);
         assert_eq!(merged.get("authorization").unwrap(), "Bearer static");
         assert_eq!(merged.get("x-service").unwrap(), "roxy");
+
+        // Mutating the returned map must not write back through to the
+        // caller's static set — the fast path owns its result.
+        merged.insert(
+            HeaderName::from_static("x-extra"),
+            HeaderValue::from_static("1"),
+        );
+        assert_eq!(static_headers.len(), 2);
+        assert!(static_headers.get("x-extra").is_none());
     }
 
     #[test]
