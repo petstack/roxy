@@ -18,6 +18,13 @@ pub struct Config {
     #[arg(long, env = "ROXY_PORT", default_value = "8080")]
     pub port: u16,
 
+    /// MCP HTTP listen host/interface (only used with --transport http).
+    /// Defaults to loopback; set `0.0.0.0` to accept connections from other
+    /// hosts (e.g. inside a Docker/Kubernetes container). Binding a
+    /// non-loopback address exposes the proxy to the network.
+    #[arg(long, env = "ROXY_HOST", default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Backend URL. Auto-detects executor type:
     ///   http(s)://...   → HTTP
     ///   host:port       → FastCGI TCP
@@ -489,6 +496,7 @@ mod tests {
         let vars: Vec<(&str, Option<&str>)> = vec![
             ("ROXY_TRANSPORT", None),
             ("ROXY_PORT", None),
+            ("ROXY_HOST", None),
             ("ROXY_UPSTREAM", None),
             ("ROXY_UPSTREAM_ENTRYPOINT", None),
             ("ROXY_UPSTREAM_INSECURE", None),
@@ -507,6 +515,33 @@ mod tests {
             assert!(cfg.upstream_header.is_empty());
             assert_eq!(cfg.pool_size, 16);
             assert!(matches!(cfg.log_format, LogFormat::Pretty));
+            assert_eq!(cfg.host, "127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn default_host_is_loopback() {
+        temp_env::with_var("ROXY_HOST", None::<&str>, || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.host, "127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn env_host_overrides_default() {
+        temp_env::with_var("ROXY_HOST", Some("0.0.0.0"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.host, "0.0.0.0");
+        });
+    }
+
+    #[test]
+    fn cli_overrides_env_host() {
+        temp_env::with_var("ROXY_HOST", Some("0.0.0.0"), || {
+            let cfg =
+                Config::try_parse_from(["roxy", "--upstream", "http://x", "--host", "10.0.0.1"])
+                    .unwrap();
+            assert_eq!(cfg.host, "10.0.0.1");
         });
     }
 
