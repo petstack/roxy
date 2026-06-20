@@ -35,17 +35,21 @@ fn derive_script_name(entrypoint: &str) -> String {
 /// with `HTTP_`. Input is assumed ASCII — the `http` crate enforces
 /// ASCII on `HeaderName` construction, so callers always pass ASCII.
 fn cgi_header_param(name: &str) -> String {
-    let mut out = String::with_capacity(5 + name.len());
-    out.push_str("HTTP_");
-    for b in name.bytes() {
-        let mapped = if b == b'-' {
+    // Work in raw bytes: each mapped byte is a flat copy, avoiding the
+    // per-`char` UTF-8 dispatch that `String::push(char)` performs. Every
+    // byte stays ASCII — the `HTTP_` prefix and `_` are ASCII, and
+    // `to_ascii_uppercase` maps ASCII→ASCII over the (ASCII-guaranteed)
+    // header name — so the final `from_utf8` validation always succeeds.
+    let mut buf = Vec::with_capacity(5 + name.len());
+    buf.extend_from_slice(b"HTTP_");
+    buf.extend(name.bytes().map(|b| {
+        if b == b'-' {
             b'_'
         } else {
             b.to_ascii_uppercase()
-        };
-        out.push(mapped as char);
-    }
-    out
+        }
+    }));
+    String::from_utf8(buf).expect("cgi_header_param emits ASCII-only bytes")
 }
 
 /// Construct the full `Params` map for a FastCGI request. Pure function
@@ -524,6 +528,17 @@ mod tests {
     #[test]
     fn cgi_header_param_empty_input() {
         assert_eq!(cgi_header_param(""), "HTTP_");
+    }
+
+    #[test]
+    fn cgi_header_param_passes_through_digits_and_underscores() {
+        // Pins the byte mapping for non-letter ASCII: digits and existing
+        // underscores must pass through unchanged (`to_ascii_uppercase` is
+        // identity on them), and only `-` becomes `_`. Guards the byte-buffer
+        // rewrite against any accidental change to the mapped set.
+        assert_eq!(cgi_header_param("x-api-key-2"), "HTTP_X_API_KEY_2");
+        assert_eq!(cgi_header_param("x_already_under"), "HTTP_X_ALREADY_UNDER");
+        assert_eq!(cgi_header_param("sec-ch-ua-v3"), "HTTP_SEC_CH_UA_V3");
     }
 
     #[test]
