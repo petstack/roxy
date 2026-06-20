@@ -67,7 +67,7 @@ fn build_fcgi_params<'a>(
     script_name: &'a str,
     request_uri: &'a str,
     body: &[u8],
-    forward_headers: Option<&http::HeaderMap>,
+    forward_headers: Option<&'a http::HeaderMap>,
 ) -> Params<'a> {
     let mut params = Params::default()
         .request_method("POST")
@@ -80,19 +80,39 @@ fn build_fcgi_params<'a>(
         .server_port(0);
 
     if let Some(headers) = forward_headers {
-        // Iterate unique header names via `keys()`, then collect every
+        // Iterate unique header names via `keys()`, then walk every
         // UTF-8-valid value via `get_all()`. This preserves multi-value
         // semantics through the CGI boundary.
         for name in headers.keys() {
-            let values: Vec<&str> = headers
-                .get_all(name)
-                .iter()
-                .filter_map(|v| v.to_str().ok())
-                .collect();
-            if values.is_empty() {
+            let mut values = headers.get_all(name).iter().filter_map(|v| v.to_str().ok());
+
+            // Skip names whose every value is non-UTF-8 (and thus dropped).
+            let Some(first) = values.next() else {
                 continue;
+            };
+            let key = cgi_header_param(name.as_str());
+
+            match values.next() {
+                // Single value — the overwhelmingly common case. Borrow it
+                // straight into the `Cow`: no intermediate `Vec`, and no
+                // join `String` either (only the `key` allocates).
+                None => {
+                    params = params.custom(key, first);
+                }
+                // 2+ values: coalesce with `", "` to match nginx `$http_*`
+                // semantics, building the joined `String` directly without
+                // the intermediate `Vec`.
+                Some(second) => {
+                    let mut joined = String::from(first);
+                    joined.push_str(", ");
+                    joined.push_str(second);
+                    for rest in values {
+                        joined.push_str(", ");
+                        joined.push_str(rest);
+                    }
+                    params = params.custom(key, joined);
+                }
             }
-            params = params.custom(cgi_header_param(name.as_str()), values.join(", "));
         }
     }
 
@@ -642,6 +662,46 @@ mod tests {
         assert_eq!(
             params.get("HTTP_X_FORWARDED_FOR").unwrap().as_ref(),
             "10.0.0.1, 10.0.0.2"
+        );
+    }
+
+    #[test]
+    fn build_fcgi_params_coalesces_three_values_skipping_non_utf8() {
+        // Guards the manual join loop (first + second + `for rest`) and its
+        // interaction with the non-UTF-8 filter: an invalid value in the
+        // middle must be dropped while the surviving values keep their order
+        // and `", "` separator — matching the old collect()+join() output.
+        use http::header::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut forward = HeaderMap::new();
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.3"),
+        );
+        forward.append(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("10.0.0.4"),
+        );
+
+        let params = build_fcgi_params(
+            "/var/www/handler.php",
+            "/handler.php",
+            "/handler.php",
+            b"",
+            Some(&forward),
+        );
+
+        assert_eq!(
+            params.get("HTTP_X_FORWARDED_FOR").unwrap().as_ref(),
+            "10.0.0.1, 10.0.0.3, 10.0.0.4"
         );
     }
 
