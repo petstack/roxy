@@ -73,6 +73,15 @@ Capabilities are discovered **per request** — roxy calls `discover` on every
 change at runtime without restarting anything. Full walkthrough with sequence
 diagrams: [User Guide → How roxy works](docs/en/introduction.md#how-roxy-works-the-big-picture).
 
+Concurrent discovers are always coalesced into a single upstream round-trip
+(single-flight), so the three list calls a client fans out at connection start
+never cause a thundering herd. If you'd rather trade a little freshness for
+fewer round-trips on a slow backend, set `--discover-cache-ttl <SECS>` to reuse
+discovery results for up to that many seconds; it defaults to `0`, which keeps
+the always-fresh behaviour above. Under `--transport http` this caching is
+scoped per MCP session, so N simultaneous fresh client connections still
+produce N discovers.
+
 ---
 
 ## Install
@@ -170,6 +179,7 @@ the path to your `handler.php`).
 | `--upstream-insecure` | `false` | Skip TLS verification (HTTPS upstreams) |
 | `--upstream-header "Name: Value"` | — | Static header for HTTP upstreams (repeatable) |
 | `--pool-size <N>` | `16` | FastCGI connection pool size |
+| `--discover-cache-ttl <SECS>` | `0` | Cache discovery results for N seconds (`0` = always fresh) |
 | `--log-format <FORMAT>` | `pretty` | `pretty` or `json` |
 
 ### Environment variables
@@ -187,6 +197,7 @@ Every flag has a matching `ROXY_*` environment variable. Precedence is
 | `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` |
 | `--upstream-header` | `ROXY_UPSTREAM_HEADER` (newline-separated; the CLI flag overrides env entirely) |
 | `--pool-size` | `ROXY_POOL_SIZE` |
+| `--discover-cache-ttl` | `ROXY_DISCOVER_CACHE_TTL` |
 | `--log-format` | `ROXY_LOG_FORMAT` |
 
 Log verbosity is controlled separately by `RUST_LOG` (e.g. `RUST_LOG=debug`).
