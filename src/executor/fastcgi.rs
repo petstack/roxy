@@ -288,10 +288,23 @@ impl FastCgiExecutor {
 #[doc(hidden)]
 pub fn body_start_offset(raw: &[u8]) -> usize {
     const SEP: &[u8] = b"\r\n\r\n";
-    match raw.windows(SEP.len()).position(|w| w == SEP) {
-        Some(pos) => pos + SEP.len(),
-        None => 0,
+    // The separator ends in '\n'. Use memchr's SIMD single-byte search to
+    // jump to each '\n', then check the four bytes ending there form
+    // "\r\n\r\n". `memchr` has no searcher-build cost (unlike
+    // `memmem::find`), so tiny header-less payloads stay as cheap as the
+    // old scalar scan while longer header blocks get the SIMD skip. The
+    // `nl >= 3` guard rejects any '\n' at index < 3 — which cannot be
+    // preceded by a full separator — and so also prevents the
+    // `raw[nl - 3..]` underflow.
+    let mut from = 0;
+    while let Some(rel) = memchr::memchr(b'\n', &raw[from..]) {
+        let nl = from + rel;
+        if nl >= 3 && &raw[nl - 3..=nl] == SEP {
+            return nl + 1;
+        }
+        from = nl + 1;
     }
+    0
 }
 
 /// Acquire a connection from `pool` with a hard wait timeout. `deadpool`'s
@@ -447,6 +460,37 @@ mod tests {
         let raw = b"Content-Type: application/json\r\n\r\n";
         let offset = body_start_offset(raw);
         assert_eq!(&raw[offset..], b"");
+    }
+
+    #[test]
+    fn test_body_start_offset_separator_at_start() {
+        // No headers at all, response opens with the blank-line separator.
+        // Exercises the `nl >= 3` guard: the first '\n' (index 1) cannot be
+        // preceded by a full separator and must be rejected without
+        // underflowing; the second '\n' (index 3) is the real terminator.
+        let raw = b"\r\n\r\n{\"ok\":true}";
+        let offset = body_start_offset(raw);
+        assert_eq!(offset, 4);
+        assert_eq!(&raw[offset..], b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn test_body_start_offset_skips_lone_newlines() {
+        // Bare-LF lines before the real CRLF separator. Each lone '\n' is a
+        // memchr hit whose preceding four bytes are not "\r\n\r\n", so the
+        // scan must skip past them and only stop at the genuine separator.
+        let raw = b"X-A: 1\nX-B: 2\r\n\r\nbody";
+        let offset = body_start_offset(raw);
+        assert_eq!(&raw[offset..], b"body");
+    }
+
+    #[test]
+    fn test_body_start_offset_returns_first_separator() {
+        // A separator inside the body must not be matched: the first
+        // "\r\n\r\n" wins, mirroring the old `windows().position()` scan.
+        let raw = b"H: v\r\n\r\nbody\r\n\r\nmore";
+        let offset = body_start_offset(raw);
+        assert_eq!(&raw[offset..], b"body\r\n\r\nmore");
     }
 
     #[test]
