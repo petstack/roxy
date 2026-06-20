@@ -246,28 +246,32 @@ impl FastCgiExecutor {
             ctx.forward_headers,
         );
 
+        // The Tcp and Unix arms are byte-identical except for the concrete
+        // pool/connection type (a distinct `fastcgi_client::Client<_,
+        // KeepAlive>` per transport) and the debug label. A generic fn can't
+        // name both client types without fighting the fastcgi-client generics,
+        // so this macro expands the shared
+        // acquire → execute(timeout) → detach body once per arm. Defined here
+        // so `self`, `params`, and `body` resolve from this enclosing scope;
+        // `params` is moved, which is fine since the match arms are mutually
+        // exclusive.
+        macro_rules! send_via {
+            ($pool:expr, $msg:literal) => {{
+                let mut conn = acquire($pool, self.pool_wait_timeout).await?;
+                debug!($msg);
+                let res = execute_with_timeout(
+                    self.request_timeout,
+                    conn.execute(Request::new(params, io::Cursor::new(body))),
+                )
+                .await;
+                detach_on_error(conn, res)?
+            }};
+        }
+
         let response = match &self.pool {
-            FcgiPool::Tcp(pool) => {
-                let mut conn = acquire(pool, self.pool_wait_timeout).await?;
-                debug!("sending FastCGI request via TCP");
-                let res = execute_with_timeout(
-                    self.request_timeout,
-                    conn.execute(Request::new(params, io::Cursor::new(body))),
-                )
-                .await;
-                detach_on_error(conn, res)?
-            }
+            FcgiPool::Tcp(pool) => send_via!(pool, "sending FastCGI request via TCP"),
             #[cfg(unix)]
-            FcgiPool::Unix(pool) => {
-                let mut conn = acquire(pool, self.pool_wait_timeout).await?;
-                debug!("sending FastCGI request via Unix socket");
-                let res = execute_with_timeout(
-                    self.request_timeout,
-                    conn.execute(Request::new(params, io::Cursor::new(body))),
-                )
-                .await;
-                detach_on_error(conn, res)?
-            }
+            FcgiPool::Unix(pool) => send_via!(pool, "sending FastCGI request via Unix socket"),
         };
 
         if let Some(stderr) = &response.stderr
