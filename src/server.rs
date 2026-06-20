@@ -3,7 +3,10 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::executor::{ExecuteContext, UpstreamExecutor};
-use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, UpstreamRequest};
+use crate::protocol::{
+    UpstreamCallResult, UpstreamContent, UpstreamDiscoverResponse, UpstreamEnvelope,
+    UpstreamPromptDef, UpstreamRequest, UpstreamResourceDef, UpstreamToolDef,
+};
 
 type McpError = rmcp::ErrorData;
 
@@ -69,79 +72,20 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
         Self { executor }
     }
 
-    /// Discover capabilities from the upstream backend and convert to MCP types.
-    async fn discover(&self) -> Result<(Vec<Tool>, Vec<Resource>, Vec<Prompt>), McpError> {
-        let discover = self.executor.discover().await.map_err(|e| {
+    /// Fetch raw capabilities from the upstream backend in a single discovery
+    /// round-trip.
+    ///
+    /// Conversion to MCP types is deliberately *not* done here. Each `list_*`
+    /// handler converts only the slice it returns (via [`convert_tools`],
+    /// [`convert_resources`], [`convert_prompts`]), so a `tools/list` no longer
+    /// builds and immediately discards the resource and prompt vectors
+    /// (issue 0007). The single discovery message to the backend is preserved —
+    /// only the wasted Rust-side conversion is removed.
+    async fn discover_raw(&self) -> Result<UpstreamDiscoverResponse, McpError> {
+        self.executor.discover().await.map_err(|e| {
             error!("upstream discover error: {e}");
             McpError::internal_error(format!("upstream discover error: {e}"), None)
-        })?;
-
-        let tools = discover
-            .tools
-            .into_iter()
-            .map(|t| {
-                let schema = t.input_schema.unwrap_or_default();
-                let mut tool = Tool::new(t.name, t.description.unwrap_or_default(), schema);
-                if let Some(title) = t.title {
-                    tool = tool.with_title(title);
-                }
-                if let Some(output) = t.output_schema {
-                    tool = tool.with_raw_output_schema(std::sync::Arc::new(output));
-                }
-                tool
-            })
-            .collect();
-
-        let resources = discover
-            .resources
-            .into_iter()
-            .map(|r| {
-                let mut raw = RawResource::new(r.uri, r.name);
-                if let Some(title) = r.title {
-                    raw = raw.with_title(title);
-                }
-                if let Some(desc) = r.description {
-                    raw.description = Some(desc);
-                }
-                if let Some(mime) = r.mime_type {
-                    raw.mime_type = Some(mime);
-                }
-                raw.no_annotation()
-            })
-            .collect();
-
-        let prompts = discover
-            .prompts
-            .into_iter()
-            .map(|p| {
-                let mut prompt = Prompt::new(
-                    p.name,
-                    p.description,
-                    Some(
-                        p.arguments
-                            .into_iter()
-                            .map(|a| {
-                                let mut arg = PromptArgument::new(a.name);
-                                if let Some(title) = a.title {
-                                    arg = arg.with_title(title);
-                                }
-                                if let Some(desc) = a.description {
-                                    arg = arg.with_description(desc);
-                                }
-                                arg = arg.with_required(a.required);
-                                arg
-                            })
-                            .collect(),
-                    ),
-                );
-                if let Some(title) = p.title {
-                    prompt = prompt.with_title(title);
-                }
-                prompt
-            })
-            .collect();
-
-        Ok((tools, resources, prompts))
+        })
     }
 
     /// Drive a tool call to completion, bounding the elicitation loop.
@@ -392,6 +336,81 @@ fn map_upstream_content(item: UpstreamContent) -> Content {
     }
 }
 
+/// Convert upstream tool definitions into MCP [`Tool`]s. Called only by
+/// `list_tools`, so the resource and prompt sets returned by the same
+/// discovery are never converted on a `tools/list` (issue 0007).
+fn convert_tools(tools: Vec<UpstreamToolDef>) -> Vec<Tool> {
+    tools
+        .into_iter()
+        .map(|t| {
+            let schema = t.input_schema.unwrap_or_default();
+            let mut tool = Tool::new(t.name, t.description.unwrap_or_default(), schema);
+            if let Some(title) = t.title {
+                tool = tool.with_title(title);
+            }
+            if let Some(output) = t.output_schema {
+                tool = tool.with_raw_output_schema(std::sync::Arc::new(output));
+            }
+            tool
+        })
+        .collect()
+}
+
+/// Convert upstream resource definitions into MCP [`Resource`]s. Called only by
+/// `list_resources`.
+fn convert_resources(resources: Vec<UpstreamResourceDef>) -> Vec<Resource> {
+    resources
+        .into_iter()
+        .map(|r| {
+            let mut raw = RawResource::new(r.uri, r.name);
+            if let Some(title) = r.title {
+                raw = raw.with_title(title);
+            }
+            if let Some(desc) = r.description {
+                raw.description = Some(desc);
+            }
+            if let Some(mime) = r.mime_type {
+                raw.mime_type = Some(mime);
+            }
+            raw.no_annotation()
+        })
+        .collect()
+}
+
+/// Convert upstream prompt definitions into MCP [`Prompt`]s. Called only by
+/// `list_prompts`.
+fn convert_prompts(prompts: Vec<UpstreamPromptDef>) -> Vec<Prompt> {
+    prompts
+        .into_iter()
+        .map(|p| {
+            let mut prompt = Prompt::new(
+                p.name,
+                p.description,
+                Some(
+                    p.arguments
+                        .into_iter()
+                        .map(|a| {
+                            let mut arg = PromptArgument::new(a.name);
+                            if let Some(title) = a.title {
+                                arg = arg.with_title(title);
+                            }
+                            if let Some(desc) = a.description {
+                                arg = arg.with_description(desc);
+                            }
+                            arg = arg.with_required(a.required);
+                            arg
+                        })
+                        .collect(),
+                ),
+            );
+            if let Some(title) = p.title {
+                prompt = prompt.with_title(title);
+            }
+            prompt
+        })
+        .collect()
+}
+
 impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -409,9 +428,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let (tools, _, _) = self.discover().await?;
+        let discover = self.discover_raw().await?;
         Ok(ListToolsResult {
-            tools,
+            tools: convert_tools(discover.tools),
             next_cursor: None,
             meta: None,
         })
@@ -445,9 +464,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let (_, resources, _) = self.discover().await?;
+        let discover = self.discover_raw().await?;
         Ok(ListResourcesResult {
-            resources,
+            resources: convert_resources(discover.resources),
             next_cursor: None,
             meta: None,
         })
@@ -515,9 +534,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        let (_, _, prompts) = self.discover().await?;
+        let discover = self.discover_raw().await?;
         Ok(ListPromptsResult {
-            prompts,
+            prompts: convert_prompts(discover.prompts),
             next_cursor: None,
             meta: None,
         })
@@ -605,6 +624,7 @@ mod tests {
     use super::*;
     use crate::protocol::{
         UpstreamContentResponse, UpstreamDiscoverResponse, UpstreamElicitResponse,
+        UpstreamPromptArgument,
     };
     use http::header::{HeaderMap, HeaderName, HeaderValue};
     use std::sync::Arc;
@@ -989,5 +1009,158 @@ mod tests {
     #[tokio::test]
     async fn run_tool_loop_stops_on_cancel() {
         assert_terminal_action(ElicitationAction::Cancel, "cancelled").await;
+    }
+
+    // --- Per-kind discovery conversion (issue 0007) ---
+
+    /// Minimal executor whose `discover` returns a fixed response (or an error),
+    /// used to exercise `discover_raw`. `execute` is never called.
+    struct DiscoverStub {
+        fail: bool,
+    }
+
+    impl UpstreamExecutor for DiscoverStub {
+        async fn execute(
+            &self,
+            _request: &UpstreamEnvelope<'_>,
+            _ctx: ExecuteContext<'_>,
+        ) -> anyhow::Result<UpstreamCallResult> {
+            anyhow::bail!("execute is not exercised by discover_raw tests")
+        }
+
+        async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
+            if self.fail {
+                anyhow::bail!("upstream exploded");
+            }
+            Ok(UpstreamDiscoverResponse {
+                tools: vec![UpstreamToolDef {
+                    name: "t".to_string(),
+                    title: None,
+                    description: None,
+                    input_schema: None,
+                    output_schema: None,
+                }],
+                resources: vec![],
+                prompts: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_raw_passes_through_upstream_response() {
+        let server = RoxyServer::new(DiscoverStub { fail: false });
+        let resp = server
+            .discover_raw()
+            .await
+            .expect("a successful discover must pass through");
+        assert_eq!(resp.tools.len(), 1);
+        assert!(resp.resources.is_empty());
+        assert!(resp.prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_raw_maps_upstream_error() {
+        let server = RoxyServer::new(DiscoverStub { fail: true });
+        let err = server
+            .discover_raw()
+            .await
+            .expect_err("an upstream failure must surface as an error");
+        assert!(
+            err.message.contains("discover") && err.message.contains("exploded"),
+            "error should name the failed stage and preserve the upstream cause, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn convert_tools_maps_fields_and_handles_empty() {
+        assert!(convert_tools(vec![]).is_empty());
+
+        let tools = convert_tools(vec![UpstreamToolDef {
+            name: "get_weather".to_string(),
+            title: Some("Weather".to_string()),
+            description: Some("Get weather".to_string()),
+            input_schema: serde_json::json!({"type": "object"}).as_object().cloned(),
+            output_schema: serde_json::json!({"type": "number"}).as_object().cloned(),
+        }]);
+
+        assert_eq!(tools.len(), 1);
+        let t = &tools[0];
+        assert_eq!(t.name.as_ref(), "get_weather");
+        assert_eq!(t.title.as_deref(), Some("Weather"));
+        assert_eq!(t.description.as_deref(), Some("Get weather"));
+        assert_eq!(
+            t.input_schema.get("type").and_then(|v| v.as_str()),
+            Some("object")
+        );
+        // Assert the output schema's *contents* survive the `Arc` wrap, not just
+        // its presence.
+        let output = t.output_schema.as_ref().expect("output schema present");
+        assert_eq!(output.get("type").and_then(|v| v.as_str()), Some("number"));
+    }
+
+    #[test]
+    fn convert_tools_handles_optional_fields_absent() {
+        let tools = convert_tools(vec![UpstreamToolDef {
+            name: "bare".to_string(),
+            title: None,
+            description: None,
+            input_schema: None,
+            output_schema: None,
+        }]);
+        let t = &tools[0];
+        assert_eq!(t.name.as_ref(), "bare");
+        assert!(t.title.is_none());
+        assert!(t.output_schema.is_none());
+    }
+
+    #[test]
+    fn convert_resources_maps_fields_and_handles_empty() {
+        assert!(convert_resources(vec![]).is_empty());
+
+        let resources = convert_resources(vec![UpstreamResourceDef {
+            uri: "file:///c.yaml".to_string(),
+            name: "config".to_string(),
+            title: Some("Config".to_string()),
+            description: Some("the config".to_string()),
+            mime_type: Some("text/yaml".to_string()),
+        }]);
+
+        assert_eq!(resources.len(), 1);
+        let r = &resources[0];
+        assert_eq!(r.uri, "file:///c.yaml");
+        assert_eq!(r.name, "config");
+        assert_eq!(r.title.as_deref(), Some("Config"));
+        assert_eq!(r.description.as_deref(), Some("the config"));
+        assert_eq!(r.mime_type.as_deref(), Some("text/yaml"));
+    }
+
+    #[test]
+    fn convert_prompts_maps_fields_and_arguments() {
+        assert!(convert_prompts(vec![]).is_empty());
+
+        let prompts = convert_prompts(vec![UpstreamPromptDef {
+            name: "review".to_string(),
+            title: Some("Review".to_string()),
+            description: Some("Code review".to_string()),
+            arguments: vec![UpstreamPromptArgument {
+                name: "lang".to_string(),
+                title: Some("Language".to_string()),
+                description: Some("the language".to_string()),
+                required: true,
+            }],
+        }]);
+
+        assert_eq!(prompts.len(), 1);
+        let p = &prompts[0];
+        assert_eq!(p.name, "review");
+        assert_eq!(p.title.as_deref(), Some("Review"));
+        assert_eq!(p.description.as_deref(), Some("Code review"));
+        let args = p.arguments.as_ref().expect("arguments must be present");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "lang");
+        assert_eq!(args[0].title.as_deref(), Some("Language"));
+        assert_eq!(args[0].description.as_deref(), Some("the language"));
+        assert_eq!(args[0].required, Some(true));
     }
 }
