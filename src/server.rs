@@ -347,24 +347,36 @@ fn filter_forward_headers(incoming: &http::HeaderMap) -> http::HeaderMap {
     out
 }
 
-fn extract_session_id(context: &rmcp::service::RequestContext<rmcp::RoleServer>) -> Option<String> {
-    context
-        .extensions
-        .get::<http::request::Parts>()
-        .and_then(|parts| parts.headers.get("mcp-session-id"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned())
+/// Extract the per-request session id and forward-header set from the rmcp
+/// request context in a **single** `http::request::Parts` extension lookup.
+///
+/// The streamable-HTTP transport attaches the original request `Parts` to the
+/// context extensions; both `mcp-session-id` and the forwardable header set
+/// are derived from `parts.headers`. Under `--transport stdio` no `Parts` is
+/// attached, so this returns `(None, None)` — the same result the two former
+/// per-field helpers produced, but without the redundant second lookup.
+fn extract_request_context(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+) -> (Option<String>, Option<http::HeaderMap>) {
+    let Some(parts) = context.extensions.get::<http::request::Parts>() else {
+        return (None, None);
+    };
+    let (session_id, forward_headers) = request_context_from_headers(&parts.headers);
+    (session_id, Some(forward_headers))
 }
 
-/// Pull incoming HTTP headers from the rmcp request context (populated
-/// by the streamable-HTTP transport) and return the forward-header set.
-/// Returns `None` under `--transport stdio`, where no `http::request::Parts`
-/// is attached to the context extensions.
-fn extract_forward_headers(
-    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
-) -> Option<http::HeaderMap> {
-    let parts = context.extensions.get::<http::request::Parts>()?;
-    Some(filter_forward_headers(&parts.headers))
+/// Derive the `mcp-session-id` and the forward-header set from a request's
+/// headers. Pure over `HeaderMap` (no rmcp context) so the session-id parse
+/// and the forward filter can be unit-tested together without constructing a
+/// `RequestContext`. `mcp-session-id` also survives `filter_forward_headers`,
+/// so it is intentionally present in *both* return values — unchanged from
+/// the two former per-field helpers.
+fn request_context_from_headers(headers: &http::HeaderMap) -> (Option<String>, http::HeaderMap) {
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned());
+    (session_id, filter_forward_headers(headers))
 }
 
 fn map_upstream_content(item: UpstreamContent) -> Content {
@@ -424,11 +436,10 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     ) -> Result<CallToolResult, McpError> {
         info!("call_tool: {}", request.name);
 
-        let session_id = extract_session_id(&context);
+        let (session_id, forward_headers) = extract_request_context(&context);
         let session_id_ref = session_id.as_deref();
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
-        let forward_headers = extract_forward_headers(&context);
         let exec_ctx = ExecuteContext {
             forward_headers: forward_headers.as_ref(),
         };
@@ -460,10 +471,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     ) -> Result<ReadResourceResult, McpError> {
         info!("read_resource: {}", request.uri);
 
-        let session_id = extract_session_id(&context);
+        let (session_id, forward_headers) = extract_request_context(&context);
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
-        let forward_headers = extract_forward_headers(&context);
         let exec_ctx = ExecuteContext {
             forward_headers: forward_headers.as_ref(),
         };
@@ -530,10 +540,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
     ) -> Result<GetPromptResult, McpError> {
         info!("get_prompt: {}", request.name);
 
-        let session_id = extract_session_id(&context);
+        let (session_id, forward_headers) = extract_request_context(&context);
         let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
         let request_id = fresh_request_id(&mut request_id_buf);
-        let forward_headers = extract_forward_headers(&context);
         let exec_ctx = ExecuteContext {
             forward_headers: forward_headers.as_ref(),
         };
@@ -725,6 +734,65 @@ mod tests {
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(values, vec!["10.0.0.1", "10.0.0.2"]);
+    }
+
+    // --- Single Parts lookup (issue 0010) ---
+
+    #[test]
+    fn request_context_from_headers_extracts_session_id_and_forwards() {
+        // The combined helper must reproduce the two former per-field
+        // helpers: session id parsed from `mcp-session-id`, and the forward
+        // set filtered. `mcp-session-id` survives the filter, so it appears
+        // in both outputs.
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            HeaderName::from_static("mcp-session-id"),
+            HeaderValue::from_static("sess-1"),
+        );
+        incoming.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer xyz"),
+        );
+        incoming.insert(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
+
+        let (session_id, forward) = request_context_from_headers(&incoming);
+
+        assert_eq!(session_id.as_deref(), Some("sess-1"));
+        assert_eq!(forward.get("authorization").unwrap(), "Bearer xyz");
+        assert_eq!(forward.get("mcp-session-id").unwrap(), "sess-1");
+        assert!(forward.get("connection").is_none());
+    }
+
+    #[test]
+    fn request_context_from_headers_no_session_id_still_forwards() {
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            HeaderName::from_static("x-my-custom"),
+            HeaderValue::from_static("value"),
+        );
+
+        let (session_id, forward) = request_context_from_headers(&incoming);
+
+        assert!(session_id.is_none());
+        assert_eq!(forward.get("x-my-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn request_context_from_headers_non_utf8_session_id_is_none() {
+        // A non-UTF-8 `mcp-session-id` must yield `None` (not an error or a
+        // lossy string), matching the old `extract_session_id` `to_str().ok()`.
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            HeaderName::from_static("mcp-session-id"),
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+
+        let (session_id, _forward) = request_context_from_headers(&incoming);
+
+        assert!(session_id.is_none());
     }
 
     // --- Bounded elicitation loop (issue 0002) ---
