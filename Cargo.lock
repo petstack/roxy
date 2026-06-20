@@ -1544,6 +1544,7 @@ dependencies = [
  "deadpool",
  "fastcgi-client",
  "http",
+ "memchr",
  "reqwest",
  "rmcp",
  "serde",
