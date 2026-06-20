@@ -654,6 +654,25 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn fresh_request_id_is_a_hyphenated_lowercase_uuid() {
+        // Pins the id format every caller relies on (the three request
+        // handlers and both executors' `discover`): a 36-char hyphenated,
+        // lowercase UUID v4, re-parseable, and distinct across calls. This
+        // is the contract that replaced `Uuid::new_v4().to_string()`.
+        let mut buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let id = fresh_request_id(&mut buf).to_owned();
+
+        assert_eq!(id.len(), 36);
+        assert_eq!(id, id.to_lowercase());
+        let parsed = Uuid::parse_str(&id).expect("must be a valid UUID");
+        assert_eq!(parsed.get_version_num(), 4);
+
+        let mut buf2 = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let id2 = fresh_request_id(&mut buf2);
+        assert_ne!(id, id2);
+    }
+
+    #[test]
     fn is_dropped_header_drops_hop_by_hop() {
         for name in [
             "connection",

@@ -6,6 +6,7 @@ use crate::config::parse_header;
 use crate::protocol::{
     UpstreamCallResult, UpstreamDiscoverResponse, UpstreamEnvelope, UpstreamRequest,
 };
+use crate::server::fresh_request_id;
 
 use super::{ExecuteContext, UpstreamExecutor};
 
@@ -129,10 +130,11 @@ impl UpstreamExecutor for HttpExecutor {
 
     async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
         // Startup handshake — no incoming client, static headers only.
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut request_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let request_id = fresh_request_id(&mut request_id_buf);
         let envelope = UpstreamEnvelope {
             session_id: None,
-            request_id: &request_id,
+            request_id,
             request: UpstreamRequest::Discover,
         };
 
