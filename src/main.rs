@@ -99,7 +99,7 @@ async fn run<E: UpstreamExecutor + 'static>(
 ) -> anyhow::Result<()> {
     match config.transport {
         Transport::Stdio => run_stdio(executor).await,
-        Transport::Http => run_http(executor, config.port).await,
+        Transport::Http => run_http(executor, &config.host, config.port).await,
     }
 }
 
@@ -116,9 +116,10 @@ async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::R
 
 async fn run_http<E: UpstreamExecutor + 'static>(
     executor: Arc<E>,
+    host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     info!("starting HTTP/SSE transport on {addr}");
 
     let ct = tokio_util::sync::CancellationToken::new();

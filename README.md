@@ -165,12 +165,20 @@ the path to your `handler.php`).
 | `--upstream <URL>` | **required** | Backend URL (auto-detects HTTP / FastCGI) |
 | `--transport <MODE>` | `stdio` | `stdio` or `http` |
 | `--port <PORT>` | `8080` | Listen port (with `--transport http`) |
+| `--host <HOST>` | `127.0.0.1` | Listen host/interface (with `--transport http`); use `0.0.0.0` to accept off-host traffic — see note below |
 | `--upstream-entrypoint <PATH>` | — | `SCRIPT_FILENAME` for FastCGI backends |
 | `--upstream-timeout <SECS>` | `30` | Upstream request timeout |
 | `--upstream-insecure` | `false` | Skip TLS verification (HTTPS upstreams) |
 | `--upstream-header "Name: Value"` | — | Static header for HTTP upstreams (repeatable) |
 | `--pool-size <N>` | `16` | FastCGI connection pool size |
 | `--log-format <FORMAT>` | `pretty` | `pretty` or `json` |
+
+> **Binding off-host.** `--host` defaults to `127.0.0.1`, so the HTTP transport is
+> reachable only from the local machine. In a container (Docker/Kubernetes) set
+> `--host 0.0.0.0` (or `ROXY_HOST=0.0.0.0`) so roxy accepts traffic from the pod
+> network. Note that `0.0.0.0` exposes the proxy on every interface — put it
+> behind a network policy, firewall, or authenticating gateway, and rely on
+> forwarded `Authorization`/auth headers reaching your upstream.
 
 ### Environment variables
 
@@ -181,6 +189,7 @@ Every flag has a matching `ROXY_*` environment variable. Precedence is
 |---|---|
 | `--transport` | `ROXY_TRANSPORT` |
 | `--port` | `ROXY_PORT` |
+| `--host` | `ROXY_HOST` |
 | `--upstream` | `ROXY_UPSTREAM` |
 | `--upstream-entrypoint` | `ROXY_UPSTREAM_ENTRYPOINT` |
 | `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` (only `true` / `false`) |
