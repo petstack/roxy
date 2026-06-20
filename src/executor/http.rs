@@ -92,6 +92,42 @@ impl HttpExecutor {
             static_headers,
         })
     }
+
+    /// Shared request plumbing for `execute` and `discover`: POST `body` with
+    /// `headers`, reject a non-2xx status, then read and debug-log the
+    /// response body. `what` (e.g. `"request"`, `"discover request"`) feeds
+    /// the log and error context, so the two callers differ only in their
+    /// header set and this label. Returns the raw body so each caller applies
+    /// its own deserialization.
+    async fn post_json(
+        &self,
+        body: Vec<u8>,
+        headers: reqwest::header::HeaderMap,
+        what: &str,
+    ) -> anyhow::Result<bytes::Bytes> {
+        debug!("sending HTTP {what} to {}", self.url);
+
+        let response = self
+            .client
+            .post(&self.url)
+            .headers(headers)
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("HTTP {what} to upstream failed"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("upstream returned HTTP {status} during {what}");
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read upstream response body")?;
+        debug!("HTTP {what} response: {}", String::from_utf8_lossy(&bytes));
+        Ok(bytes)
+    }
 }
 
 impl UpstreamExecutor for HttpExecutor {
@@ -101,29 +137,9 @@ impl UpstreamExecutor for HttpExecutor {
         ctx: ExecuteContext<'_>,
     ) -> anyhow::Result<UpstreamCallResult> {
         let body = serde_json::to_vec(request)?;
-        debug!("sending HTTP request to {}", self.url);
-
         let headers = merge_forward_headers(&self.static_headers, ctx.forward_headers);
 
-        let response = self
-            .client
-            .post(&self.url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .context("HTTP request to upstream failed")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            anyhow::bail!("upstream returned HTTP {status}");
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .context("failed to read upstream response body")?;
-        debug!("HTTP response: {}", String::from_utf8_lossy(&bytes));
+        let bytes = self.post_json(body, headers, "request").await?;
         UpstreamCallResult::parse(&bytes).context("failed to parse upstream response")
     }
 
@@ -137,34 +153,11 @@ impl UpstreamExecutor for HttpExecutor {
         };
 
         let body = serde_json::to_vec(&envelope)?;
-        debug!("sending HTTP discover request to {}", self.url);
 
-        let response = self
-            .client
-            .post(&self.url)
-            .headers(self.static_headers.clone())
-            .body(body)
-            .send()
-            .await
-            .context("HTTP discover request failed")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            anyhow::bail!("upstream returned HTTP {status} during discover");
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .context("failed to read discover response body")?;
-        debug!(
-            "HTTP discover response: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let response: UpstreamDiscoverResponse =
-            serde_json::from_slice(&bytes).context("failed to parse upstream discover response")?;
-        Ok(response)
+        let bytes = self
+            .post_json(body, self.static_headers.clone(), "discover request")
+            .await?;
+        serde_json::from_slice(&bytes).context("failed to parse upstream discover response")
     }
 }
 
