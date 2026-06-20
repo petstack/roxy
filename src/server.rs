@@ -196,10 +196,12 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                     let content: Vec<Content> =
                         c.content.into_iter().map(map_upstream_content).collect();
 
+                    // `success()` initializes `structured_content` to `None`,
+                    // so assigning unconditionally is equivalent to the former
+                    // `is_some()` guard — the guard only ever skipped a no-op
+                    // `None`-to-`None` write.
                     let mut result = CallToolResult::success(content);
-                    if c.structured_content.is_some() {
-                        result.structured_content = c.structured_content;
-                    }
+                    result.structured_content = c.structured_content;
 
                     return Ok(result);
                 }
