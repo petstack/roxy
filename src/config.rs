@@ -65,6 +65,17 @@ pub struct Config {
     #[arg(long, env = "ROXY_POOL_SIZE", default_value = "16")]
     pub pool_size: usize,
 
+    /// Upstream-discovery cache TTL in seconds.
+    ///
+    /// `0` (default) keeps the always-fresh contract: every `tools/list`,
+    /// `resources/list` and `prompts/list` triggers a fresh upstream
+    /// `discover`, except that *concurrent* discovers are still coalesced into
+    /// one round-trip (single-flight). A positive value additionally serves
+    /// back-to-back list calls from cache for up to that many seconds, trading
+    /// at most `N` seconds of staleness for fewer upstream round-trips.
+    #[arg(long, env = "ROXY_DISCOVER_CACHE_TTL", default_value = "0")]
+    pub discover_cache_ttl: u64,
+
     /// Log output format
     #[arg(long, env = "ROXY_LOG_FORMAT", default_value = "pretty")]
     pub log_format: LogFormat,
@@ -325,6 +336,7 @@ mod tests {
             ("ROXY_UPSTREAM_HEADER", None),
             ("ROXY_POOL_SIZE", None),
             ("ROXY_LOG_FORMAT", None),
+            ("ROXY_DISCOVER_CACHE_TTL", None),
         ];
         temp_env::with_vars(vars, || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
@@ -336,6 +348,30 @@ mod tests {
             assert!(cfg.upstream_header.is_empty());
             assert_eq!(cfg.pool_size, 16);
             assert!(matches!(cfg.log_format, LogFormat::Pretty));
+            assert_eq!(cfg.discover_cache_ttl, 0);
+        });
+    }
+
+    #[test]
+    fn env_discover_cache_ttl_parsed() {
+        temp_env::with_var("ROXY_DISCOVER_CACHE_TTL", Some("15"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.discover_cache_ttl, 15);
+        });
+    }
+
+    #[test]
+    fn cli_overrides_env_discover_cache_ttl() {
+        temp_env::with_var("ROXY_DISCOVER_CACHE_TTL", Some("15"), || {
+            let cfg = Config::try_parse_from([
+                "roxy",
+                "--upstream",
+                "http://x",
+                "--discover-cache-ttl",
+                "5",
+            ])
+            .unwrap();
+            assert_eq!(cfg.discover_cache_ttl, 5);
         });
     }
 

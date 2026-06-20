@@ -1,11 +1,19 @@
+use std::time::Duration;
+
 use rmcp::{ServerHandler, model::*};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::discover_cache::DiscoverCache;
 use crate::executor::{ExecuteContext, UpstreamExecutor};
 use crate::protocol::{UpstreamCallResult, UpstreamContent, UpstreamEnvelope, UpstreamRequest};
 
 type McpError = rmcp::ErrorData;
+
+/// The converted MCP capability sets produced by one upstream discovery.
+/// Cached as a unit because a single upstream `discover` call already returns
+/// all three, and the three `list_*` handlers each need only their slice.
+type Discovered = (Vec<Tool>, Vec<Resource>, Vec<Prompt>);
 
 /// Hard cap on how many elicitation rounds a single `call_tool` may drive.
 ///
@@ -28,6 +36,10 @@ pub fn fresh_request_id(buf: &mut [u8; uuid::fmt::Hyphenated::LENGTH]) -> &str {
 
 pub struct RoxyServer<E: UpstreamExecutor> {
     executor: E,
+    /// Coalesces the three `list_*` discovery round-trips a client fans out at
+    /// connection start, and (when a TTL is configured) serves later list
+    /// calls from cache. See [`DiscoverCache`] for the freshness contract.
+    discover_cache: DiscoverCache<Discovered>,
 }
 
 /// The one client-facing side effect of the `call_tool` elicitation loop:
@@ -65,12 +77,35 @@ impl ElicitationPrompter for PeerPrompter<'_> {
 }
 
 impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
+    /// Build a server. Discovery defaults to "always fresh": no time-based
+    /// cache, only single-flight coalescing of concurrent discovers. Opt into
+    /// a staleness window with [`RoxyServer::with_discover_cache_ttl`].
     pub fn new(executor: E) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            discover_cache: DiscoverCache::new(Duration::ZERO),
+        }
     }
 
-    /// Discover capabilities from the upstream backend and convert to MCP types.
-    async fn discover(&self) -> Result<(Vec<Tool>, Vec<Resource>, Vec<Prompt>), McpError> {
+    /// Set the upstream-discovery cache TTL. `Duration::ZERO` keeps the default
+    /// behaviour (single-flight only); a positive TTL additionally serves
+    /// back-to-back list calls from cache for up to that window.
+    pub fn with_discover_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.discover_cache = DiscoverCache::new(ttl);
+        self
+    }
+
+    /// Discover capabilities from the upstream, going through the cache so
+    /// concurrent calls coalesce and (with a TTL) recent results are reused.
+    async fn discover(&self) -> Result<Discovered, McpError> {
+        self.discover_cache
+            .get_or_fetch(|| self.discover_uncached())
+            .await
+    }
+
+    /// Perform a single uncached upstream discovery and convert it to MCP
+    /// types. This is the work the cache coalesces; it never reads the cache.
+    async fn discover_uncached(&self) -> Result<Discovered, McpError> {
         let discover = self.executor.discover().await.map_err(|e| {
             error!("upstream discover error: {e}");
             McpError::internal_error(format!("upstream discover error: {e}"), None)

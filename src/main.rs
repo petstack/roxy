@@ -97,15 +97,27 @@ async fn run<E: UpstreamExecutor + 'static>(
     executor: Arc<E>,
     config: &Config,
 ) -> anyhow::Result<()> {
+    let discover_cache_ttl = std::time::Duration::from_secs(config.discover_cache_ttl);
+    if discover_cache_ttl.is_zero() {
+        info!("discovery cache: disabled (single-flight only, always fresh)");
+    } else {
+        info!(
+            "discovery cache: enabled, TTL {}s",
+            config.discover_cache_ttl
+        );
+    }
     match config.transport {
-        Transport::Stdio => run_stdio(executor).await,
-        Transport::Http => run_http(executor, config.port).await,
+        Transport::Stdio => run_stdio(executor, discover_cache_ttl).await,
+        Transport::Http => run_http(executor, config.port, discover_cache_ttl).await,
     }
 }
 
-async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::Result<()> {
+async fn run_stdio<E: UpstreamExecutor + 'static>(
+    executor: Arc<E>,
+    discover_cache_ttl: std::time::Duration,
+) -> anyhow::Result<()> {
     info!("starting stdio transport");
-    let server = RoxyServer::new(executor);
+    let server = RoxyServer::new(executor).with_discover_cache_ttl(discover_cache_ttl);
     let service = server
         .serve(rmcp::transport::io::stdio())
         .await
@@ -117,6 +129,7 @@ async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::R
 async fn run_http<E: UpstreamExecutor + 'static>(
     executor: Arc<E>,
     port: u16,
+    discover_cache_ttl: std::time::Duration,
 ) -> anyhow::Result<()> {
     let addr = format!("127.0.0.1:{port}");
     info!("starting HTTP/SSE transport on {addr}");
@@ -124,7 +137,7 @@ async fn run_http<E: UpstreamExecutor + 'static>(
     let ct = tokio_util::sync::CancellationToken::new();
 
     let service = StreamableHttpService::new(
-        move || Ok(RoxyServer::new(executor.clone())),
+        move || Ok(RoxyServer::new(executor.clone()).with_discover_cache_ttl(discover_cache_ttl)),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );

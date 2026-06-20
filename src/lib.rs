@@ -5,6 +5,7 @@
 //! hot-path helpers the server uses.
 
 pub mod config;
+pub mod discover_cache;
 pub mod executor;
 pub mod protocol;
 pub mod server;
