@@ -3,9 +3,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use rmcp::ServiceExt;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use tracing::{info, warn};
 
 use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_header_list};
@@ -13,6 +10,7 @@ use roxy::executor::UpstreamExecutor;
 use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
 use roxy::server::RoxyServer;
+use roxy::transport::http_service;
 
 fn init_logging(format: &LogFormat) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(
@@ -123,11 +121,7 @@ async fn run_http<E: UpstreamExecutor + 'static>(
 
     let ct = tokio_util::sync::CancellationToken::new();
 
-    let service = StreamableHttpService::new(
-        move || Ok(RoxyServer::new(executor.clone())),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
-    );
+    let service = http_service(executor, ct.child_token());
 
     let router = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(&addr)

@@ -43,8 +43,8 @@ pub struct RoxyServer<E: UpstreamExecutor> {
 trait ElicitationPrompter {
     fn prompt(
         &self,
-        params: CreateElicitationRequestParams,
-    ) -> impl std::future::Future<Output = Result<CreateElicitationResult, McpError>> + Send;
+        params: ElicitRequestParams,
+    ) -> impl std::future::Future<Output = Result<ElicitResult, McpError>> + Send;
 }
 
 /// Production [`ElicitationPrompter`] backed by the live MCP client peer.
@@ -53,10 +53,7 @@ struct PeerPrompter<'p> {
 }
 
 impl ElicitationPrompter for PeerPrompter<'_> {
-    async fn prompt(
-        &self,
-        params: CreateElicitationRequestParams,
-    ) -> Result<CreateElicitationResult, McpError> {
+    async fn prompt(&self, params: ElicitRequestParams) -> Result<ElicitResult, McpError> {
         self.peer.create_elicitation(params).await.map_err(|e| {
             error!("elicitation request failed: {e}");
             McpError::internal_error(format!("elicitation failed: {e}"), None)
@@ -96,7 +93,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             .resources
             .into_iter()
             .map(|r| {
-                let mut raw = RawResource::new(r.uri, r.name);
+                let mut raw = Resource::new(r.uri, r.name);
                 if let Some(title) = r.title {
                     raw = raw.with_title(title);
                 }
@@ -106,7 +103,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                 if let Some(mime) = r.mime_type {
                     raw.mime_type = Some(mime);
                 }
-                raw.no_annotation()
+                raw
             })
             .collect();
 
@@ -193,7 +190,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
 
             match response {
                 UpstreamCallResult::Content(c) => {
-                    let content: Vec<Content> =
+                    let content: Vec<ContentBlock> =
                         c.content.into_iter().map(map_upstream_content).collect();
 
                     let mut result = CallToolResult::success(content);
@@ -204,7 +201,9 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                     return Ok(result);
                 }
                 UpstreamCallResult::Error(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(e.error.message)]));
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        e.error.message,
+                    )]));
                 }
                 UpstreamCallResult::Elicit(elicit) => {
                     // Bound the loop *before* prompting the client again: a
@@ -241,7 +240,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                             )
                         })?;
 
-                    let params = CreateElicitationRequestParams::FormElicitationParams {
+                    let params = ElicitRequestParams::FormElicitationParams {
                         meta: None,
                         message,
                         requested_schema: schema,
@@ -249,50 +248,50 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
 
                     let elicit_result = prompter.prompt(params).await?;
 
-                    match elicit_result.action {
+                    // One match yields both the upstream wire token and the
+                    // client-facing message for every terminal action, while
+                    // `Accept` re-enters the loop directly. `ElicitationAction`
+                    // is `#[non_exhaustive]` in rmcp 3.x, so a future revision
+                    // may add actions: anything that is not `Accept` carries no
+                    // answer to feed back, which makes "stop and tell the
+                    // upstream" the only safe default.
+                    let (action_str, msg) = match &elicit_result.action {
                         ElicitationAction::Accept => {
                             if let Some(content) = elicit_result.content {
                                 elicitation_results.push(content);
                             }
                             elicit_context = elicit_ctx;
-                            // continue loop — re-invoke upstream with results
+                            // re-invoke upstream with the accumulated results
+                            continue;
                         }
-                        action @ (ElicitationAction::Decline | ElicitationAction::Cancel) => {
-                            // Single match over the two terminal actions yields
-                            // both the upstream wire token and the client-facing
-                            // message — no `unreachable!()` arms to drift out of
-                            // sync if `ElicitationAction` ever grows a variant.
-                            let (action_str, msg) = match action {
-                                ElicitationAction::Decline => {
-                                    ("decline", "User declined to provide information")
-                                }
-                                ElicitationAction::Cancel => {
-                                    ("cancel", "User cancelled the operation")
-                                }
-                                ElicitationAction::Accept => unreachable!("guarded by outer arm"),
-                            };
-
-                            // Notify upstream about cancellation
-                            let cancel_request = UpstreamRequest::ElicitationCancelled {
-                                name: &request.name,
-                                action: action_str,
-                                context: elicit_ctx.as_ref(),
-                            };
-                            let cancel_envelope = UpstreamEnvelope {
-                                session_id,
-                                request_id,
-                                request: cancel_request,
-                            };
-                            if let Err(e) = self.executor.execute(&cancel_envelope, exec_ctx).await
-                            {
-                                warn!(
-                                    "failed to notify upstream about elicitation cancellation: {e}"
-                                );
-                            }
-
-                            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+                        ElicitationAction::Decline => {
+                            ("decline", "User declined to provide information")
                         }
+                        ElicitationAction::Cancel => ("cancel", "User cancelled the operation"),
+                        unknown => {
+                            warn!(
+                                "unknown elicitation action {unknown:?} from client; treating as cancel"
+                            );
+                            ("cancel", "Elicitation ended without an answer")
+                        }
+                    };
+
+                    // Notify upstream about cancellation
+                    let cancel_request = UpstreamRequest::ElicitationCancelled {
+                        name: &request.name,
+                        action: action_str,
+                        context: elicit_ctx.as_ref(),
+                    };
+                    let cancel_envelope = UpstreamEnvelope {
+                        session_id,
+                        request_id,
+                        request: cancel_request,
+                    };
+                    if let Err(e) = self.executor.execute(&cancel_envelope, exec_ctx).await {
+                        warn!("failed to notify upstream about elicitation cancellation: {e}");
                     }
+
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
                 }
             }
         }
@@ -367,9 +366,9 @@ fn extract_forward_headers(
     Some(filter_forward_headers(&parts.headers))
 }
 
-fn map_upstream_content(item: UpstreamContent) -> Content {
+fn map_upstream_content(item: UpstreamContent) -> ContentBlock {
     match item {
-        UpstreamContent::Text { text } => Content::text(text),
+        UpstreamContent::Text { text } => ContentBlock::text(text),
         UpstreamContent::ResourceLink {
             uri,
             name,
@@ -377,7 +376,7 @@ fn map_upstream_content(item: UpstreamContent) -> Content {
             description,
             mime_type,
         } => {
-            let mut raw = RawResource::new(uri, name);
+            let mut raw = Resource::new(uri, name);
             if let Some(t) = title {
                 raw = raw.with_title(t);
             }
@@ -387,7 +386,7 @@ fn map_upstream_content(item: UpstreamContent) -> Content {
             if let Some(m) = mime_type {
                 raw.mime_type = Some(m);
             }
-            Content::resource_link(raw)
+            ContentBlock::resource_link(raw)
         }
     }
 }
@@ -410,18 +409,18 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let (tools, _, _) = self.discover().await?;
-        Ok(ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        })
+        // `with_all_items` stamps `resultType: "complete"` (SEP-2322). rmcp
+        // strips the field again for peers that negotiated a pre-`2026-07-28`
+        // revision, so one construction serves every client. Cache hints
+        // (`ttlMs`/`cacheScope`) are left unset — see issue 0024.
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         info!("call_tool: {}", request.name);
 
         let session_id = extract_session_id(&context);
@@ -436,8 +435,15 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         let prompter = PeerPrompter {
             peer: &context.peer,
         };
-        self.run_tool_loop(&request, session_id_ref, request_id, exec_ctx, &prompter)
-            .await
+        // `2026-07-28` replaces server-initiated elicitation with multi
+        // round-trip requests, where this arm becomes
+        // `CallToolResponse::InputRequired`. Until issue 0022 lands roxy always
+        // completes in one response, driving elicitation through the legacy
+        // server-initiated loop for every revision.
+        let result = self
+            .run_tool_loop(&request, session_id_ref, request_id, exec_ctx, &prompter)
+            .await?;
+        Ok(CallToolResponse::Complete(result))
     }
 
     async fn list_resources(
@@ -446,18 +452,14 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let (_, resources, _) = self.discover().await?;
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         info!("read_resource: {}", request.uri);
 
         let session_id = extract_session_id(&context);
@@ -498,7 +500,9 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                         ),
                     })
                     .collect();
-                Ok(ReadResourceResult::new(contents))
+                Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                    contents,
+                )))
             }
             UpstreamCallResult::Error(e) => {
                 Err(McpError::resource_not_found(e.error.message, None))
@@ -516,18 +520,14 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         let (_, _, prompts) = self.discover().await?;
-        Ok(ListPromptsResult {
-            prompts,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListPromptsResult::with_all_items(prompts))
     }
 
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<GetPromptResult, McpError> {
+    ) -> Result<GetPromptResponse, McpError> {
         info!("get_prompt: {}", request.name);
 
         let session_id = extract_session_id(&context);
@@ -563,7 +563,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                     .into_iter()
                     .map(|item| match item {
                         UpstreamContent::Text { text } => {
-                            PromptMessage::new_text(PromptMessageRole::Assistant, text)
+                            PromptMessage::new_text(Role::Assistant, text)
                         }
                         UpstreamContent::ResourceLink {
                             uri,
@@ -572,7 +572,7 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             description,
                             mime_type,
                         } => {
-                            let mut raw = RawResource::new(uri, name);
+                            let mut raw = Resource::new(uri, name);
                             if let Some(t) = title {
                                 raw = raw.with_title(t);
                             }
@@ -582,14 +582,11 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
                             if let Some(m) = mime_type {
                                 raw.mime_type = Some(m);
                             }
-                            PromptMessage::new_resource_link(
-                                PromptMessageRole::Assistant,
-                                raw.no_annotation(),
-                            )
+                            PromptMessage::new_resource_link(Role::Assistant, raw)
                         }
                     })
                     .collect();
-                Ok(GetPromptResult::new(messages))
+                Ok(GetPromptResponse::Complete(GetPromptResult::new(messages)))
             }
             UpstreamCallResult::Error(e) => Err(McpError::invalid_params(e.error.message, None)),
             UpstreamCallResult::Elicit(_) => Err(McpError::internal_error(
@@ -813,17 +810,13 @@ mod tests {
     }
 
     impl ElicitationPrompter for StubPrompter {
-        async fn prompt(
-            &self,
-            _params: CreateElicitationRequestParams,
-        ) -> Result<CreateElicitationResult, McpError> {
+        async fn prompt(&self, _params: ElicitRequestParams) -> Result<ElicitResult, McpError> {
             self.prompts.fetch_add(1, Ordering::SeqCst);
-            let content = matches!(self.action, ElicitationAction::Accept)
-                .then(|| serde_json::json!({"answer": "yes"}));
-            Ok(CreateElicitationResult {
-                action: self.action.clone(),
-                content,
-            })
+            let mut result = ElicitResult::new(self.action.clone());
+            if matches!(self.action, ElicitationAction::Accept) {
+                result = result.with_content(serde_json::json!({"answer": "yes"}));
+            }
+            Ok(result)
         }
     }
 

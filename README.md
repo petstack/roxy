@@ -145,6 +145,28 @@ roxy exposes MCP to clients over one of two transports, set with `--transport`:
 - **`http`** — an HTTP + SSE server on `--port` (default `8080`, path `/mcp`) for
   shared/team deployments where multiple clients connect over the network.
 
+### MCP protocol revisions
+
+roxy is a gateway, so it serves **every** MCP revision a client may speak.
+Clients upgrade on their own schedule; roxy absorbs the difference so your
+backend never has to know which era the caller comes from. One process answers
+all of them on the same endpoint:
+
+| Revisions | Lifecycle | Result shape |
+|---|---|---|
+| `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` | `initialize` handshake, plus `Mcp-Session-Id` and the standalone `GET` SSE stream where the revision defines them | no `resultType` |
+| `2026-07-28` | no handshake — every request carries its own `_meta` (protocol version, client capabilities, client info) and no session id | `resultType` on every result; `Mcp-Method` / `Mcp-Name` request headers are required and validated against the body (`-32020` on mismatch) |
+
+The revision is chosen **per request**, not per deployment: a `2025-11-25`
+client and a `2026-07-28` client can share one roxy process and each receives
+result shapes valid for its own revision. A client that wants to know what roxy
+speaks before committing can ask with `server/discover`.
+
+Not yet implemented for `2026-07-28`: multi round-trip elicitation (MRTR) and
+cache hints (`ttlMs` / `cacheScope`) on list results. Elicitation still uses the
+server-initiated flow, so multi-step "ask the user" tools require a client on
+`2025-06-18` … `2025-11-25`; everything else works on every revision.
+
 ### Choosing a backend
 
 The `--upstream` value is **auto-detected** — you don't pick the executor type:

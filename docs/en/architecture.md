@@ -30,6 +30,7 @@ each call into the internal JSON protocol and forwards it to the configured
 | [`src/main.rs`](https://github.com/petstack/roxy/blob/main/src/main.rs) | Entry point — parses the CLI, selects the executor, starts the stdio or HTTP transport. |
 | [`src/config.rs`](https://github.com/petstack/roxy/blob/main/src/config.rs) | CLI configuration via `clap`; `UpstreamKind` auto-detection from the `--upstream` URL. |
 | [`src/server.rs`](https://github.com/petstack/roxy/blob/main/src/server.rs) | `RoxyServer<E>` — implements `rmcp::ServerHandler`, discovers upstream capabilities per request, forwards MCP calls to the configured executor, and filters hop-by-hop headers for forwarding. |
+| [`src/transport.rs`](https://github.com/petstack/roxy/blob/main/src/transport.rs) | Builds the Streamable-HTTP service served under `/mcp`, configured to answer every MCP revision — sessions for the legacy ones, stateless for `2026-07-28`. |
 | [`src/protocol.rs`](https://github.com/petstack/roxy/blob/main/src/protocol.rs) | The internal JSON protocol — `UpstreamRequest`, `UpstreamCallResult`, `UpstreamDiscoverResponse`, `UpstreamEnvelope`. |
 | [`src/executor/mod.rs`](https://github.com/petstack/roxy/blob/main/src/executor/mod.rs) | The `UpstreamExecutor` trait with `execute()` and `discover()`, plus the per-request `ExecuteContext`. |
 | [`src/executor/fastcgi.rs`](https://github.com/petstack/roxy/blob/main/src/executor/fastcgi.rs) | `FastCgiExecutor` — TCP or Unix socket, `deadpool` connection pooling, CGI `HTTP_*` parameter mapping. |

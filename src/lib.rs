@@ -8,6 +8,7 @@ pub mod config;
 pub mod executor;
 pub mod protocol;
 pub mod server;
+pub mod transport;
 
 /// Internal re-exports used by `benches/`. Not part of the stable public API;
 /// the contents can change or disappear between versions.
