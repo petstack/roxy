@@ -110,6 +110,9 @@ A quick guide to the most common problems.
 | `upstream response has no 'elicit', 'error', or 'content' field` | Your handler returned an empty or unknown-shape response. | Return one of `content`, `error`, or `elicit`. |
 | `invalid header format: expected 'Name: Value'` | One of your `--upstream-header` entries is malformed. | Fix the syntax — colon plus space between name and value. |
 | `invalid value 'TRUE' for '--upstream-insecure'` | Env variable only accepts lowercase `true` / `false`. | Use `true` or `false`. |
+| Clients get `403 Forbidden`, log says `rejected request with disallowed Host header` | The `Host` the client (or your reverse proxy) sent isn't in roxy's allow-list, which defaults to loopback only. | Add it: `--allowed-host mcp.example.com`. See [Configuration → HTTP](configuration.md#http). |
+| Clients get `413 Payload Too Large` | The request body exceeded `--max-body-size` (4 MiB by default). | Raise `--max-body-size`. |
+| A tool that asks follow-up questions returns "requires a server-initiated elicitation request" | The client negotiated MCP `2026-07-28`, which replaced server-initiated elicitation with multi round-trip requests — not implemented yet. | Call that tool from a client on `2025-06-18` … `2025-11-25`. |
 | TLS handshake error | The upstream's HTTPS certificate isn't trusted. | Install the CA, or (dev only) add `--upstream-insecure`. |
 
 Errors that happen mid-request are also returned to the MCP client as standard JSON-RPC errors, so the AI can report them to the user.

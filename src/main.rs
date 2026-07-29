@@ -5,7 +5,7 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use tracing::{info, warn};
 
-use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_header_list};
+use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_list};
 use roxy::executor::UpstreamExecutor;
 use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
@@ -32,7 +32,11 @@ async fn main() -> anyhow::Result<()> {
     // Without this, a blank line at the start/end of ROXY_UPSTREAM_HEADER
     // (e.g. from a Kubernetes YAML `|-` block scalar) would reach
     // parse_header() as an empty string and fail with "invalid header format".
-    config.upstream_header = normalize_header_list(std::mem::take(&mut config.upstream_header));
+    config.upstream_header = normalize_list(std::mem::take(&mut config.upstream_header));
+    // Same for ROXY_ALLOWED_HOST, where a blank entry would be worse than
+    // spurious: rmcp treats it as a host pattern matching nothing, so an
+    // empty env var would reject every request instead of allowing any.
+    config.allowed_host = normalize_list(std::mem::take(&mut config.allowed_host));
 
     info!("roxy starting");
     info!("transport: {:?}", config.transport);
@@ -97,7 +101,7 @@ async fn run<E: UpstreamExecutor + 'static>(
 ) -> anyhow::Result<()> {
     match config.transport {
         Transport::Stdio => run_stdio(executor).await,
-        Transport::Http => run_http(executor, config.port).await,
+        Transport::Http => run_http(executor, config).await,
     }
 }
 
@@ -114,14 +118,26 @@ async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::R
 
 async fn run_http<E: UpstreamExecutor + 'static>(
     executor: Arc<E>,
-    port: u16,
+    config: &Config,
 ) -> anyhow::Result<()> {
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("127.0.0.1:{}", config.port);
     info!("starting HTTP/SSE transport on {addr}");
+    // Worth a line in the log either way: a mismatch here surfaces as a bare
+    // 403 with nothing pointing at the cause.
+    if config.allowed_host.is_empty() || config.allowed_host.iter().any(|host| host == "*") {
+        warn!("Host validation is disabled — every Host header is accepted");
+    } else {
+        info!("accepted Host values: {}", config.allowed_host.join(", "));
+    }
 
     let ct = tokio_util::sync::CancellationToken::new();
 
-    let service = http_service(executor, ct.child_token());
+    let service = http_service(
+        executor,
+        &config.allowed_host,
+        config.max_body_size,
+        ct.child_token(),
+    );
 
     let router = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(&addr)

@@ -61,6 +61,41 @@ pub struct Config {
     )]
     pub upstream_header: Vec<String>,
 
+    /// Hostname accepted in the `Host` header of inbound MCP requests
+    /// (repeatable, only used with `--transport http`).
+    ///
+    /// The default is loopback-only, which is what stops a malicious web page
+    /// from reaching a roxy running on a developer's machine through DNS
+    /// rebinding. A roxy behind a reverse proxy usually receives the public
+    /// name the client typed, so that name has to be listed here (e.g.
+    /// `--allowed-host mcp.example.com`) or those requests are answered with
+    /// `403 Forbidden`. Entries may carry a port (`example.com:8080`), which
+    /// then has to match too.
+    ///
+    /// Two ways to accept any `Host`: the special value `*`, or an empty list.
+    /// Only do that when something in front of roxy already validates it.
+    ///
+    /// When set via env (`ROXY_ALLOWED_HOST`) entries are separated by `\n`,
+    /// like `ROXY_UPSTREAM_HEADER`.
+    #[arg(
+        long,
+        env = "ROXY_ALLOWED_HOST",
+        value_delimiter = '\n',
+        num_args = 0..,
+        default_values = ["localhost", "127.0.0.1", "::1"],
+    )]
+    pub allowed_host: Vec<String>,
+
+    /// Maximum inbound MCP request body size in bytes (only used with
+    /// `--transport http`).
+    ///
+    /// Bodies over the limit are rejected with `413 Payload Too Large`,
+    /// enforced while streaming, so a lying `Content-Length` does not get
+    /// around it. Raise it if clients send large tool arguments — an embedded
+    /// document or image, say — through to the backend.
+    #[arg(long, env = "ROXY_MAX_BODY_SIZE", default_value = "4194304")]
+    pub max_body_size: usize,
+
     /// FastCGI connection pool size
     #[arg(long, env = "ROXY_POOL_SIZE", default_value = "16")]
     pub pool_size: usize,
@@ -121,14 +156,17 @@ impl FcgiAddress {
     }
 }
 
-/// Drop whitespace-only or empty entries from a header list.
+/// Drop whitespace-only or empty entries from a repeatable list flag.
 ///
 /// The main input to this helper is a `Vec<String>` that came from clap,
-/// where a trailing/leading `\n` in `ROXY_UPSTREAM_HEADER` (e.g. from a
+/// where a trailing/leading `\n` in a `\n`-delimited env var (e.g. from a
 /// Kubernetes YAML `|-` block scalar) or an empty env var can produce
 /// spurious empty slots. Filtering them here keeps the rest of the
-/// pipeline simple.
-pub fn normalize_header_list(raw: Vec<String>) -> Vec<String> {
+/// pipeline simple — and for `ROXY_ALLOWED_HOST` it is load-bearing: a
+/// blank entry would otherwise reach rmcp as a host pattern that matches
+/// nothing, turning `ROXY_ALLOWED_HOST=` into "reject every request"
+/// rather than "no restriction".
+pub fn normalize_list(raw: Vec<String>) -> Vec<String> {
     raw.into_iter().filter(|s| !s.trim().is_empty()).collect()
 }
 
@@ -206,28 +244,26 @@ mod tests {
     }
 
     #[test]
-    fn normalize_header_list_empty() {
-        let out = normalize_header_list(Vec::<String>::new());
+    fn normalize_list_empty() {
+        let out = normalize_list(Vec::<String>::new());
         assert!(out.is_empty());
     }
 
     #[test]
-    fn normalize_header_list_drops_empty_strings() {
-        let out =
-            normalize_header_list(vec!["A: 1".to_string(), "".to_string(), "B: 2".to_string()]);
+    fn normalize_list_drops_empty_strings() {
+        let out = normalize_list(vec!["A: 1".to_string(), "".to_string(), "B: 2".to_string()]);
         assert_eq!(out, vec!["A: 1".to_string(), "B: 2".to_string()]);
     }
 
     #[test]
-    fn normalize_header_list_drops_whitespace_only() {
-        let out =
-            normalize_header_list(vec!["   ".to_string(), "\t".to_string(), "\n".to_string()]);
+    fn normalize_list_drops_whitespace_only() {
+        let out = normalize_list(vec!["   ".to_string(), "\t".to_string(), "\n".to_string()]);
         assert!(out.is_empty());
     }
 
     #[test]
-    fn normalize_header_list_preserves_order_in_mixed_input() {
-        let out = normalize_header_list(vec![
+    fn normalize_list_preserves_order_in_mixed_input() {
+        let out = normalize_list(vec![
             "".to_string(),
             "A: 1".to_string(),
             "   ".to_string(),
@@ -416,7 +452,7 @@ mod tests {
     fn env_upstream_header_trailing_newline_trimmed() {
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("A: 1\n"), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
-            let normalized = normalize_header_list(cfg.upstream_header);
+            let normalized = normalize_list(cfg.upstream_header);
             assert_eq!(normalized, vec!["A: 1".to_string()]);
         });
     }
@@ -425,7 +461,7 @@ mod tests {
     fn env_upstream_header_yaml_block_scalar() {
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("\nA: 1\nB: 2\n"), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
-            let normalized = normalize_header_list(cfg.upstream_header);
+            let normalized = normalize_list(cfg.upstream_header);
             assert_eq!(normalized, vec!["A: 1".to_string(), "B: 2".to_string()]);
         });
     }
@@ -450,13 +486,13 @@ mod tests {
         // Pin the pipeline contract: when the env var is set to "" (which
         // happens in Kubernetes when a ConfigMap key exists but has no
         // content), clap produces a one-element vec containing the empty
-        // string. Task 6's normalize_header_list call in main.rs must
+        // string. Task 6's normalize_list call in main.rs must
         // collapse that to an empty vec before any downstream consumer
         // tries to parse it as a "Name: Value" header.
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some(""), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
             assert_eq!(cfg.upstream_header, vec!["".to_string()]);
-            assert!(normalize_header_list(cfg.upstream_header).is_empty());
+            assert!(normalize_list(cfg.upstream_header).is_empty());
         });
     }
 }

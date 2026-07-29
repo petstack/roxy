@@ -295,6 +295,44 @@ roxy runs as a standalone server and listens on a port (default `:8080`). Client
 roxy --transport http --port 8080 --upstream http://your-backend/
 ```
 
+**Who may connect.** roxy accepts only requests whose `Host` header is
+`localhost`, `127.0.0.1` or `::1`. That default is a guard, not an oversight: it
+stops a page open in someone's browser from reaching a roxy running on their
+machine by pointing a hostname at `127.0.0.1` (DNS rebinding). Put roxy behind
+nginx, Caddy or Traefik and the client's own hostname usually arrives unchanged,
+so list it — otherwise every request comes back `403 Forbidden`:
+
+```
+roxy --transport http --allowed-host mcp.example.com --upstream http://your-backend/
+```
+
+Use `--allowed-host '*'` to turn the check off entirely, which is reasonable
+only when whatever sits in front of roxy already validates the host.
+
+---
+
+## MCP protocol revisions
+
+roxy is a gateway, so it serves **every** MCP revision a client may speak, and
+picks the behaviour per request from the revision that client negotiated. One
+process answers all of them on the same endpoint:
+
+| Revisions | Lifecycle | Result shape |
+|---|---|---|
+| `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` | `initialize` handshake, plus `Mcp-Session-Id` and the standalone `GET` SSE stream where the revision defines them | no `resultType` |
+| `2026-07-28` | no handshake — every request carries its own `_meta` (protocol version, client capabilities, client info) and no session id | `resultType` on every result; `Mcp-Method` / `Mcp-Name` request headers are required and validated against the body |
+
+Nothing in your backend has to change for this — roxy absorbs the difference, so
+one handler serves clients from both eras. A client can also ask what roxy
+speaks, without committing to a revision, by calling `server/discover`.
+
+Two things `2026-07-28` does not have yet in roxy: multi round-trip elicitation
+(MRTR) and cache hints (`ttlMs` / `cacheScope`) on list results. Elicitation
+still uses the server-initiated flow that `2026-07-28` removed, so a multi-step
+"ask the user" tool needs a client on `2025-06-18` … `2025-11-25`; from a
+`2026-07-28` client the call returns an error explaining that instead of
+hanging.
+
 ---
 
 ## Connecting to your backend
@@ -339,6 +377,8 @@ Every flag has a matching environment variable. Precedence: **CLI > environment 
 | `--upstream-timeout <secs>` | `ROXY_UPSTREAM_TIMEOUT` | `30` | How long roxy waits for your backend before giving up. |
 | `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `false` | Skip TLS certificate verification. Only use in development. Env accepts only literal `true` or `false`. |
 | `--upstream-header "Name: Value"` | `ROXY_UPSTREAM_HEADER` | — | Add a static header to every upstream HTTP request. Repeatable on CLI. Ignored for FastCGI. |
+| `--allowed-host <host>` | `ROXY_ALLOWED_HOST` | `localhost`, `127.0.0.1`, `::1` | `Host` header values accepted from clients, when transport is `http`. Repeatable on CLI, newline-separated in env. Entries may include a port. `*` accepts any host. |
+| `--max-body-size <bytes>` | `ROXY_MAX_BODY_SIZE` | `4194304` (4 MiB) | Largest inbound request body. Bigger ones get `413 Payload Too Large`. Raise it if clients send large tool arguments. |
 | `--pool-size <N>` | `ROXY_POOL_SIZE` | `16` | Number of reusable connections to a FastCGI backend. |
 | `--log-format <fmt>` | `ROXY_LOG_FORMAT` | `pretty` | `pretty` for humans, `json` for log aggregators. |
 
@@ -856,6 +896,9 @@ A quick guide to the most common problems.
 | `upstream response has no 'elicit', 'error', or 'content' field` | Your handler returned an empty or unknown-shape response. | Return one of `content`, `error`, or `elicit`. |
 | `invalid header format: expected 'Name: Value'` | One of your `--upstream-header` entries is malformed. | Fix the syntax — colon plus space between name and value. |
 | `invalid value 'TRUE' for '--upstream-insecure'` | Env variable only accepts lowercase `true` / `false`. | Use `true` or `false`. |
+| Clients get `403 Forbidden`, log says `rejected request with disallowed Host header` | The `Host` the client (or your reverse proxy) sent isn't in roxy's allow-list, which defaults to loopback only. | Add it: `--allowed-host mcp.example.com`. See [Configuration → HTTP](configuration.md#http). |
+| Clients get `413 Payload Too Large` | The request body exceeded `--max-body-size` (4 MiB by default). | Raise `--max-body-size`. |
+| A tool that asks follow-up questions returns "requires a server-initiated elicitation request" | The client negotiated MCP `2026-07-28`, which replaced server-initiated elicitation with multi round-trip requests — not implemented yet. | Call that tool from a client on `2025-06-18` … `2025-11-25`. |
 | TLS handshake error | The upstream's HTTPS certificate isn't trusted. | Install the CA, or (dev only) add `--upstream-insecure`. |
 
 Errors that happen mid-request are also returned to the MCP client as standard JSON-RPC errors, so the AI can report them to the user.
@@ -1023,7 +1066,7 @@ each call into the internal JSON protocol and forwards it to the configured
 | [`src/main.rs`](https://github.com/petstack/roxy/blob/main/src/main.rs) | Entry point — parses the CLI, selects the executor, starts the stdio or HTTP transport. |
 | [`src/config.rs`](https://github.com/petstack/roxy/blob/main/src/config.rs) | CLI configuration via `clap`; `UpstreamKind` auto-detection from the `--upstream` URL. |
 | [`src/server.rs`](https://github.com/petstack/roxy/blob/main/src/server.rs) | `RoxyServer<E>` — implements `rmcp::ServerHandler`, discovers upstream capabilities per request, forwards MCP calls to the configured executor, and filters hop-by-hop headers for forwarding. |
-| [`src/transport.rs`](https://github.com/petstack/roxy/blob/main/src/transport.rs) | Builds the Streamable-HTTP service served under `/mcp`, configured to answer every MCP revision — sessions for the legacy ones, stateless for `2026-07-28`. |
+| [`src/transport.rs`](https://github.com/petstack/roxy/blob/main/src/transport.rs) | Builds the Streamable-HTTP service, configured to answer every MCP revision — sessions for the legacy ones, stateless for `2026-07-28` — and to apply roxy's inbound policies (`Host` allow-list, request-body cap). |
 | [`src/protocol.rs`](https://github.com/petstack/roxy/blob/main/src/protocol.rs) | The internal JSON protocol — `UpstreamRequest`, `UpstreamCallResult`, `UpstreamDiscoverResponse`, `UpstreamEnvelope`. |
 | [`src/executor/mod.rs`](https://github.com/petstack/roxy/blob/main/src/executor/mod.rs) | The `UpstreamExecutor` trait with `execute()` and `discover()`, plus the per-request `ExecuteContext`. |
 | [`src/executor/fastcgi.rs`](https://github.com/petstack/roxy/blob/main/src/executor/fastcgi.rs) | `FastCgiExecutor` — TCP or Unix socket, `deadpool` connection pooling, CGI `HTTP_*` parameter mapping. |
