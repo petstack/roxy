@@ -44,6 +44,49 @@ roxy runs as a standalone server and listens on a port (default `:8080`). Client
 roxy --transport http --port 8080 --upstream http://your-backend/
 ```
 
+**Who may connect.** roxy accepts only requests whose `Host` header is
+`localhost`, `127.0.0.1` or `::1`. That default is a guard, not an oversight: it
+stops a page open in someone's browser from reaching a roxy running on their
+machine by pointing a hostname at `127.0.0.1` (DNS rebinding). Put roxy behind
+nginx, Caddy or Traefik and the client's own hostname usually arrives unchanged,
+so list it — otherwise every request comes back `403 Forbidden`:
+
+```
+roxy --transport http --allowed-host mcp.example.com --upstream http://your-backend/
+```
+
+Use `--allowed-host '*'` to turn the check off entirely, which is reasonable
+only when whatever sits in front of roxy already validates the host.
+
+---
+
+## MCP protocol revisions
+
+roxy is a gateway, so it serves **every** MCP revision a client may speak, and
+picks the behaviour per request from the revision that client negotiated. One
+process answers all of them on the same endpoint:
+
+| Revisions | Lifecycle | Result shape |
+|---|---|---|
+| `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` | `initialize` handshake, plus `Mcp-Session-Id` and the standalone `GET` SSE stream where the revision defines them | no `resultType` |
+| `2026-07-28` | no handshake — every request carries its own `_meta` (protocol version, client capabilities, client info) and no session id | `resultType` on every result; `Mcp-Method` / `Mcp-Name` request headers are required and validated against the body |
+
+Nothing in your backend has to change for this — roxy absorbs the difference, so
+one handler serves clients from both eras. A client can also ask what roxy
+speaks, without committing to a revision, by calling `server/discover`.
+
+Two things `2026-07-28` does not have yet in roxy: multi round-trip elicitation
+(MRTR) and cache hints (`ttlMs` / `cacheScope`) on list results. Elicitation
+still uses the server-initiated flow that `2026-07-28` removed, so asking the
+user a follow-up question needs a client that can receive one: `2025-06-18` …
+`2025-11-25`, running the `initialize` handshake (a stateless request has no
+channel for the answer), and declaring support for **form** elicitation — URL
+mode alone is not enough, because roxy asks with a form. Any other client gets an
+error naming the reason instead of a call that never finishes, and your backend
+gets an `elicitation_cancelled` with `action: "unsupported"` so it can drop the
+pending form — see
+[The backend API](backend-api.md#elicitation_cancelled).
+
 ---
 
 ## Connecting to your backend
@@ -88,6 +131,8 @@ Every flag has a matching environment variable. Precedence: **CLI > environment 
 | `--upstream-timeout <secs>` | `ROXY_UPSTREAM_TIMEOUT` | `30` | How long roxy waits for your backend before giving up. |
 | `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` | `false` | Skip TLS certificate verification. Only use in development. Env accepts only literal `true` or `false`. |
 | `--upstream-header "Name: Value"` | `ROXY_UPSTREAM_HEADER` | — | Add a static header to every upstream HTTP request. Repeatable on CLI. Ignored for FastCGI. |
+| `--allowed-host <host>` | `ROXY_ALLOWED_HOST` | `localhost`, `127.0.0.1`, `::1` | `Host` header values accepted from clients, when transport is `http`. Repeatable on CLI, newline-separated in env. Entries may include a port. `*` accepts any host. |
+| `--max-body-size <bytes>` | `ROXY_MAX_BODY_SIZE` | `4194304` (4 MiB) | Largest inbound request body. Bigger ones get `413 Payload Too Large`. Raise it if clients send large tool arguments. |
 | `--pool-size <N>` | `ROXY_POOL_SIZE` | `16` | Number of reusable connections to a FastCGI backend. |
 | `--log-format <fmt>` | `ROXY_LOG_FORMAT` | `pretty` | `pretty` for humans, `json` for log aggregators. |
 

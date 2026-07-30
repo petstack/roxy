@@ -3,16 +3,16 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use rmcp::ServiceExt;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use tracing::{info, warn};
 
-use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_header_list};
+use roxy::config::{
+    Config, LogFormat, Transport, UpstreamKind, host_validation_disabled, normalize_list,
+};
 use roxy::executor::UpstreamExecutor;
 use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
 use roxy::server::RoxyServer;
+use roxy::transport::http_service;
 
 fn init_logging(format: &LogFormat) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     // Without this, a blank line at the start/end of ROXY_UPSTREAM_HEADER
     // (e.g. from a Kubernetes YAML `|-` block scalar) would reach
     // parse_header() as an empty string and fail with "invalid header format".
-    config.upstream_header = normalize_header_list(std::mem::take(&mut config.upstream_header));
+    config.upstream_header = normalize_list(std::mem::take(&mut config.upstream_header));
 
     info!("roxy starting");
     info!("transport: {:?}", config.transport);
@@ -99,7 +99,7 @@ async fn run<E: UpstreamExecutor + 'static>(
 ) -> anyhow::Result<()> {
     match config.transport {
         Transport::Stdio => run_stdio(executor).await,
-        Transport::Http => run_http(executor, config.port).await,
+        Transport::Http => run_http(executor, config).await,
     }
 }
 
@@ -116,17 +116,26 @@ async fn run_stdio<E: UpstreamExecutor + 'static>(executor: Arc<E>) -> anyhow::R
 
 async fn run_http<E: UpstreamExecutor + 'static>(
     executor: Arc<E>,
-    port: u16,
+    config: &Config,
 ) -> anyhow::Result<()> {
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("127.0.0.1:{}", config.port);
     info!("starting HTTP/SSE transport on {addr}");
+    // Worth a line in the log either way: a mismatch here surfaces as a bare
+    // 403 with nothing pointing at the cause.
+    let allowed_hosts = config.allowed_hosts();
+    if host_validation_disabled(&allowed_hosts) {
+        warn!("Host validation is disabled — every Host header is accepted");
+    } else {
+        info!("accepted Host values: {}", allowed_hosts.join(", "));
+    }
 
     let ct = tokio_util::sync::CancellationToken::new();
 
-    let service = StreamableHttpService::new(
-        move || Ok(RoxyServer::new(executor.clone())),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+    let service = http_service(
+        executor,
+        &allowed_hosts,
+        config.max_body_size,
+        ct.child_token(),
     );
 
     let router = axum::Router::new().nest_service("/mcp", service);

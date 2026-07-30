@@ -42,7 +42,7 @@ flowchart TB
     E --> U[User fills form]
     U --> CT
 
-    EL -->|user cancels| EC[elicitation_cancelled]
+    EL -->|no answer coming| EC[elicitation_cancelled]
     EL -->|no| OK[returns content]
 ```
 
@@ -52,7 +52,7 @@ flowchart TB
 | `call_tool` | Whenever the AI invokes a tool | Run a tool and return a result. |
 | `read_resource` | Whenever the AI reads a resource | Fetch a resource by URI. |
 | `get_prompt` | Whenever the AI renders a prompt | Fill a prompt template with arguments. |
-| `elicitation_cancelled` | After a user declines an elicitation | Let the backend clean up any pending state. |
+| `elicitation_cancelled` | When an elicitation will not be answered — declined, cancelled, or undeliverable to that client | Let the backend clean up any pending state. |
 
 ---
 
@@ -342,7 +342,7 @@ Sent when the AI wants to render a prompt template.
 
 ## `elicitation_cancelled`
 
-Sent when a user declines or cancels an elicitation form you asked for. Use it to clean up pending state. roxy does not care what you return.
+Sent when an elicitation form you asked for will not be answered — the user declined or cancelled it, or roxy could not put the question to this client at all. Either way you are holding state for a form that is over, so this is your cue to drop it. roxy does not care what you return.
 
 **Request**
 
@@ -359,8 +359,28 @@ Sent when a user declines or cancels an elicitation form you asked for. Use it t
 
 | Field | Meaning |
 |---|---|
-| `action` | Either `"decline"` (user said no) or `"cancel"` (user closed the form). |
+| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user decided anything**: the exchange ended before an answer could come back. |
 | `context` | Whatever you put in your previous `elicit` response. |
+
+`"unsupported"` covers every ending where nobody chose anything. Either the client
+could not be asked —
+
+- it is on MCP `2026-07-28`, which replaced server-initiated elicitation with
+  multi round-trip requests (not implemented yet);
+- it sent a stateless request, which has no channel for an answer;
+- its revision predates elicitation (before `2025-06-18`);
+- it did not declare support for **form** elicitation;
+
+— or it was asked and no answer arrived: it rejected or failed the request, or
+went away mid-prompt. One more case is your side: if the `schema` in your `elicit`
+response is not a valid elicitation schema, roxy cannot ask at all, and you get
+`"unsupported"` for that too.
+
+Whatever the cause, the meaning for you is the same: that form is over, drop its
+state. Do not read it as "the user refused" — metering it as user abandonment will
+misreport your funnel. If you see it constantly, check your own `schema` first,
+then which clients are reaching you; the client gets an error message naming the
+specific reason, and roxy logs it at `WARN`.
 
 ---
 

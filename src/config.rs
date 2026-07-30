@@ -61,6 +61,47 @@ pub struct Config {
     )]
     pub upstream_header: Vec<String>,
 
+    /// Hostname accepted in the `Host` header of inbound MCP requests
+    /// (repeatable, only used with `--transport http`).
+    ///
+    /// The default is loopback-only, which is what stops a malicious web page
+    /// from reaching a roxy running on a developer's machine through DNS
+    /// rebinding. A roxy behind a reverse proxy usually receives the public
+    /// name the client typed, so that name has to be listed here (e.g.
+    /// `--allowed-host mcp.example.com`) or those requests are answered with
+    /// `403 Forbidden`. Entries may carry a port (`example.com:8080`), which
+    /// then has to match too.
+    ///
+    /// The special value `*` accepts any `Host`, turning the check off. Only do
+    /// that when something in front of roxy already validates it. An empty or
+    /// blank value is *not* a way to disable it — see [`Config::allowed_hosts`].
+    ///
+    /// When set via env (`ROXY_ALLOWED_HOST`) entries are separated by `\n`,
+    /// like `ROXY_UPSTREAM_HEADER`.
+    #[arg(
+        long,
+        env = "ROXY_ALLOWED_HOST",
+        value_delimiter = '\n',
+        num_args = 0..,
+        default_values = DEFAULT_ALLOWED_HOSTS,
+    )]
+    pub allowed_host: Vec<String>,
+
+    /// Maximum inbound MCP request body size in bytes (only used with
+    /// `--transport http`).
+    ///
+    /// Bodies over the limit are rejected with `413 Payload Too Large`,
+    /// enforced while streaming, so a lying `Content-Length` does not get
+    /// around it. Raise it if clients send large tool arguments — an embedded
+    /// document or image, say — through to the backend.
+    #[arg(
+        long,
+        env = "ROXY_MAX_BODY_SIZE",
+        default_value = "4194304",
+        value_parser = parse_body_size,
+    )]
+    pub max_body_size: usize,
+
     /// FastCGI connection pool size
     #[arg(long, env = "ROXY_POOL_SIZE", default_value = "16")]
     pub pool_size: usize,
@@ -68,6 +109,53 @@ pub struct Config {
     /// Log output format
     #[arg(long, env = "ROXY_LOG_FORMAT", default_value = "pretty")]
     pub log_format: LogFormat,
+}
+
+/// `Host` values accepted when `--allowed-host` is not configured: loopback
+/// only, so a page in someone's browser cannot reach a roxy on their machine by
+/// pointing a hostname at `127.0.0.1`.
+pub const DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+impl Config {
+    /// The `Host` allow-list to enforce, ready to hand to the transport.
+    ///
+    /// Drops blank entries — a `ROXY_ALLOWED_HOST` that exists but is empty (a
+    /// Kubernetes ConfigMap key with no value), a bare `--allowed-host` — and
+    /// falls back to [`DEFAULT_ALLOWED_HOSTS`] when nothing usable is left. That
+    /// fallback is the point: an empty list tells rmcp to accept *every* host, so
+    /// a blank value would silently disable the only DNS-rebinding defence roxy
+    /// has, in exactly the case where an operator believes they configured it.
+    /// `*` stays the one explicit, greppable way to turn the check off.
+    ///
+    /// Both the binary and the integration tests go through here, so the policy
+    /// under test is the policy that ships.
+    pub fn allowed_hosts(&self) -> Vec<String> {
+        let hosts = normalize_list(self.allowed_host.clone());
+        if hosts.is_empty() {
+            return DEFAULT_ALLOWED_HOSTS
+                .iter()
+                .map(|host| (*host).to_string())
+                .collect();
+        }
+        hosts
+    }
+}
+
+/// Whether `hosts` turns `Host` validation off entirely. Shared by the startup
+/// log and the transport builder so the two cannot disagree about what the
+/// configuration means.
+pub fn host_validation_disabled(hosts: &[String]) -> bool {
+    hosts.iter().any(|host| host == "*")
+}
+
+/// Parse `--max-body-size`, rejecting `0` — which would reject every request,
+/// never what an operator means, and a confusing way to find out.
+fn parse_body_size(raw: &str) -> Result<usize, String> {
+    match raw.parse::<usize>() {
+        Ok(0) => Err("must be at least 1 byte".to_string()),
+        Ok(bytes) => Ok(bytes),
+        Err(e) => Err(format!("not a byte count: {e}")),
+    }
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -166,14 +254,17 @@ impl FcgiAddress {
     }
 }
 
-/// Drop whitespace-only or empty entries from a header list.
+/// Drop whitespace-only or empty entries from a repeatable list flag.
 ///
 /// The main input to this helper is a `Vec<String>` that came from clap,
-/// where a trailing/leading `\n` in `ROXY_UPSTREAM_HEADER` (e.g. from a
+/// where a trailing/leading `\n` in a `\n`-delimited env var (e.g. from a
 /// Kubernetes YAML `|-` block scalar) or an empty env var can produce
 /// spurious empty slots. Filtering them here keeps the rest of the
-/// pipeline simple.
-pub fn normalize_header_list(raw: Vec<String>) -> Vec<String> {
+/// pipeline simple — and for `ROXY_ALLOWED_HOST` it is load-bearing: a
+/// blank entry would otherwise reach rmcp as a host pattern that matches
+/// nothing, turning `ROXY_ALLOWED_HOST=` into "reject every request"
+/// rather than "no restriction".
+pub fn normalize_list(raw: Vec<String>) -> Vec<String> {
     raw.into_iter().filter(|s| !s.trim().is_empty()).collect()
 }
 
@@ -377,28 +468,26 @@ mod tests {
     }
 
     #[test]
-    fn normalize_header_list_empty() {
-        let out = normalize_header_list(Vec::<String>::new());
+    fn normalize_list_empty() {
+        let out = normalize_list(Vec::<String>::new());
         assert!(out.is_empty());
     }
 
     #[test]
-    fn normalize_header_list_drops_empty_strings() {
-        let out =
-            normalize_header_list(vec!["A: 1".to_string(), "".to_string(), "B: 2".to_string()]);
+    fn normalize_list_drops_empty_strings() {
+        let out = normalize_list(vec!["A: 1".to_string(), "".to_string(), "B: 2".to_string()]);
         assert_eq!(out, vec!["A: 1".to_string(), "B: 2".to_string()]);
     }
 
     #[test]
-    fn normalize_header_list_drops_whitespace_only() {
-        let out =
-            normalize_header_list(vec!["   ".to_string(), "\t".to_string(), "\n".to_string()]);
+    fn normalize_list_drops_whitespace_only() {
+        let out = normalize_list(vec!["   ".to_string(), "\t".to_string(), "\n".to_string()]);
         assert!(out.is_empty());
     }
 
     #[test]
-    fn normalize_header_list_preserves_order_in_mixed_input() {
-        let out = normalize_header_list(vec![
+    fn normalize_list_preserves_order_in_mixed_input() {
+        let out = normalize_list(vec![
             "".to_string(),
             "A: 1".to_string(),
             "   ".to_string(),
@@ -587,7 +676,7 @@ mod tests {
     fn env_upstream_header_trailing_newline_trimmed() {
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("A: 1\n"), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
-            let normalized = normalize_header_list(cfg.upstream_header);
+            let normalized = normalize_list(cfg.upstream_header);
             assert_eq!(normalized, vec!["A: 1".to_string()]);
         });
     }
@@ -596,7 +685,7 @@ mod tests {
     fn env_upstream_header_yaml_block_scalar() {
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some("\nA: 1\nB: 2\n"), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
-            let normalized = normalize_header_list(cfg.upstream_header);
+            let normalized = normalize_list(cfg.upstream_header);
             assert_eq!(normalized, vec!["A: 1".to_string(), "B: 2".to_string()]);
         });
     }
@@ -621,13 +710,129 @@ mod tests {
         // Pin the pipeline contract: when the env var is set to "" (which
         // happens in Kubernetes when a ConfigMap key exists but has no
         // content), clap produces a one-element vec containing the empty
-        // string. Task 6's normalize_header_list call in main.rs must
+        // string. Task 6's normalize_list call in main.rs must
         // collapse that to an empty vec before any downstream consumer
         // tries to parse it as a "Name: Value" header.
         temp_env::with_var("ROXY_UPSTREAM_HEADER", Some(""), || {
             let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
             assert_eq!(cfg.upstream_header, vec!["".to_string()]);
-            assert!(normalize_header_list(cfg.upstream_header).is_empty());
+            assert!(normalize_list(cfg.upstream_header).is_empty());
+        });
+    }
+
+    // --- inbound HTTP policy ---
+
+    /// Parse with the two policy env vars cleared, so a developer who exports
+    /// them does not get confusing failures.
+    fn parse_clean(args: &[&str]) -> Config {
+        temp_env::with_vars_unset(["ROXY_ALLOWED_HOST", "ROXY_MAX_BODY_SIZE"], || {
+            Config::try_parse_from(args).unwrap()
+        })
+    }
+
+    #[test]
+    fn allowed_hosts_defaults_to_loopback() {
+        let cfg = parse_clean(&["roxy", "--upstream", "http://x"]);
+        assert_eq!(cfg.allowed_hosts(), DEFAULT_ALLOWED_HOSTS.to_vec());
+        assert!(!host_validation_disabled(&cfg.allowed_hosts()));
+    }
+
+    #[test]
+    fn allowed_hosts_takes_repeated_cli_values() {
+        let cfg = parse_clean(&[
+            "roxy",
+            "--upstream",
+            "http://x",
+            "--allowed-host",
+            "a.example.com",
+            "--allowed-host",
+            "b.example.com:8443",
+        ]);
+        assert_eq!(
+            cfg.allowed_hosts(),
+            vec![
+                "a.example.com".to_string(),
+                "b.example.com:8443".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn env_allowed_host_newline_split() {
+        temp_env::with_var(
+            "ROXY_ALLOWED_HOST",
+            Some("a.example.com\nb.example.com"),
+            || {
+                let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+                assert_eq!(
+                    cfg.allowed_hosts(),
+                    vec!["a.example.com".to_string(), "b.example.com".to_string()]
+                );
+            },
+        );
+    }
+
+    /// The security-relevant case. rmcp reads an empty allow-list as "accept
+    /// every host", so a blank `ROXY_ALLOWED_HOST` — a ConfigMap key that exists
+    /// with no content — must fall back to loopback rather than fail open.
+    #[test]
+    fn env_allowed_host_empty_falls_back_to_loopback() {
+        temp_env::with_var("ROXY_ALLOWED_HOST", Some(""), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.allowed_host, vec!["".to_string()]);
+            assert_eq!(cfg.allowed_hosts(), DEFAULT_ALLOWED_HOSTS.to_vec());
+            assert!(!host_validation_disabled(&cfg.allowed_hosts()));
+        });
+    }
+
+    /// …and the only way to actually turn the check off stays explicit.
+    #[test]
+    fn wildcard_allowed_host_disables_validation() {
+        let cfg = parse_clean(&["roxy", "--upstream", "http://x", "--allowed-host", "*"]);
+        assert!(host_validation_disabled(&cfg.allowed_hosts()));
+    }
+
+    #[test]
+    fn cli_allowed_host_overrides_env() {
+        temp_env::with_var("ROXY_ALLOWED_HOST", Some("fromenv.example.com"), || {
+            let cfg = Config::try_parse_from([
+                "roxy",
+                "--upstream",
+                "http://x",
+                "--allowed-host",
+                "fromcli.example.com",
+            ])
+            .unwrap();
+            assert_eq!(cfg.allowed_hosts(), vec!["fromcli.example.com".to_string()]);
+        });
+    }
+
+    #[test]
+    fn max_body_size_defaults_to_4_mib() {
+        let cfg = parse_clean(&["roxy", "--upstream", "http://x"]);
+        assert_eq!(cfg.max_body_size, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn env_max_body_size_parsed() {
+        temp_env::with_var("ROXY_MAX_BODY_SIZE", Some("1048576"), || {
+            let cfg = Config::try_parse_from(["roxy", "--upstream", "http://x"]).unwrap();
+            assert_eq!(cfg.max_body_size, 1048576);
+        });
+    }
+
+    /// Zero would reject every request; failing at startup beats debugging a
+    /// 413 on an empty body.
+    #[test]
+    fn max_body_size_rejects_zero() {
+        temp_env::with_vars_unset(["ROXY_MAX_BODY_SIZE"], || {
+            let err =
+                Config::try_parse_from(["roxy", "--upstream", "http://x", "--max-body-size", "0"])
+                    .expect_err("zero must not parse");
+            assert!(
+                err.to_string().contains("at least 1 byte"),
+                "error must say why, got: {err}"
+            );
         });
     }
 }

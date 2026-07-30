@@ -145,6 +145,31 @@ roxy exposes MCP to clients over one of two transports, set with `--transport`:
 - **`http`** — an HTTP + SSE server on `--port` (default `8080`, path `/mcp`) for
   shared/team deployments where multiple clients connect over the network.
 
+### MCP protocol revisions
+
+roxy is a gateway, so it serves **every** MCP revision a client may speak.
+Clients upgrade on their own schedule; roxy absorbs the difference so your
+backend never has to know which era the caller comes from. One process answers
+all of them on the same endpoint:
+
+| Revisions | Lifecycle | Result shape |
+|---|---|---|
+| `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25` | `initialize` handshake, plus `Mcp-Session-Id` and the standalone `GET` SSE stream where the revision defines them | no `resultType` |
+| `2026-07-28` | no handshake — every request carries its own `_meta` (protocol version, client capabilities, client info) and no session id | `resultType` on every result; `Mcp-Method` / `Mcp-Name` request headers are required and validated against the body (`-32020` on mismatch) |
+
+The revision is chosen **per request**, not per deployment: a `2025-11-25`
+client and a `2026-07-28` client can share one roxy process and each receives
+result shapes valid for its own revision. A client that wants to know what roxy
+speaks before committing can ask with `server/discover`.
+
+Not yet implemented for `2026-07-28`: multi round-trip elicitation (MRTR) and
+cache hints (`ttlMs` / `cacheScope`) on list results. Elicitation still uses the
+server-initiated flow, which `2026-07-28` removed, so a multi-step "ask the
+user" tool needs a client that runs the `initialize` handshake on
+`2025-06-18` … `2025-11-25` and declares support for **form** elicitation. Any
+other client gets an error explaining which of those it failed, rather than a call
+that never finishes. Everything else works on every revision.
+
 ### Choosing a backend
 
 The `--upstream` value is **auto-detected** — you don't pick the executor type:
@@ -169,8 +194,16 @@ the path to your `handler.php`).
 | `--upstream-timeout <SECS>` | `30` | Upstream request timeout |
 | `--upstream-insecure` | `false` | Skip TLS verification (HTTPS upstreams) |
 | `--upstream-header "Name: Value"` | — | Static header for HTTP upstreams (repeatable) |
+| `--allowed-host <HOST>` | loopback | `Host` values accepted from clients (repeatable, `*` = any) |
+| `--max-body-size <BYTES>` | `4194304` | Largest inbound request body (4 MiB) |
 | `--pool-size <N>` | `16` | FastCGI connection pool size |
 | `--log-format <FORMAT>` | `pretty` | `pretty` or `json` |
+
+> **Behind a reverse proxy?** roxy only accepts requests whose `Host` is
+> `localhost`, `127.0.0.1` or `::1` — that is what stops a web page from
+> reaching a locally running roxy through DNS rebinding. A proxy usually
+> forwards the client's original `Host`, so add it with `--allowed-host
+> mcp.example.com` or those requests get `403 Forbidden`.
 
 ### Environment variables
 
@@ -186,6 +219,8 @@ Every flag has a matching `ROXY_*` environment variable. Precedence is
 | `--upstream-insecure` | `ROXY_UPSTREAM_INSECURE` (only `true` / `false`) |
 | `--upstream-timeout` | `ROXY_UPSTREAM_TIMEOUT` |
 | `--upstream-header` | `ROXY_UPSTREAM_HEADER` (newline-separated; the CLI flag overrides env entirely) |
+| `--allowed-host` | `ROXY_ALLOWED_HOST` (newline-separated) |
+| `--max-body-size` | `ROXY_MAX_BODY_SIZE` |
 | `--pool-size` | `ROXY_POOL_SIZE` |
 | `--log-format` | `ROXY_LOG_FORMAT` |
 
