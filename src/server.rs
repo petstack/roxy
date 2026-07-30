@@ -141,24 +141,28 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        // Order the catalogue here, once, rather than in each list handler.
+        // Order the catalogue in one place rather than in the three list
+        // handlers. All three sorts run on every list request — each handler
+        // calls `discover()` and drops the two vectors it did not ask for — which
+        // is fine next to the upstream round trip that just returned.
         //
-        // MCP `2026-07-28` makes a deterministic `tools/list` order a SHOULD,
-        // for a concrete reason: the tool list is serialized into the model's
-        // prompt, so a reordering invalidates the client's prompt-prefix cache
-        // for the whole system prompt. roxy re-runs discovery on every list
-        // request, so a backend that builds its catalogue from a directory scan,
-        // an unordered registry, or a `SELECT` with no `ORDER BY` would hand the
-        // client a fresh permutation each time and it would never get a cache
-        // hit. Sorting costs nothing next to the upstream round trip that just
-        // happened, and it removes the whole class of problem no matter what any
-        // backend does.
+        // MCP `2026-07-28` makes a deterministic `tools/list` order a SHOULD, for
+        // a concrete reason: the tool list is serialized into the model's prompt,
+        // so a reordering invalidates the client's prompt-prefix cache for the
+        // whole system prompt. Since roxy re-runs discovery per request, a
+        // backend whose catalogue order is incidental would hand the client a
+        // fresh permutation every time and it would never get a cache hit.
         //
-        // `sort_unstable_*` is fine: MCP names and resource URIs are unique
-        // within a server, so there are no equal keys whose relative order could
-        // matter. The spec only asks for tools; resources and prompts get the
-        // same treatment because the reasoning is identical and inconsistency
-        // here would just be surprising.
+        // Unstable rather than stable: roxy's backend contract requires unique
+        // names and URIs (MCP itself makes that a SHOULD, and only for tool
+        // names), so for any input the two produce the same output — and an
+        // unstable sort works in place where `sort_by` allocates a scratch
+        // buffer per list request. A backend that ships duplicates anyway just
+        // gets an arbitrary order among entries that `call_tool` could not have
+        // addressed separately.
+        //
+        // Comparison is bytewise, so the order is by code point: no locale, no
+        // platform variance — which is what makes it reproducible at all.
         tools.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         resources.sort_unstable_by(|a, b| a.uri.cmp(&b.uri));
         prompts.sort_unstable_by(|a, b| a.name.cmp(&b.name));
@@ -1014,6 +1018,12 @@ mod tests {
     }
 
     // --- Deterministic catalogue order (issue 0026) ---
+    //
+    // These target `discover()` rather than the `list_*` handlers because that
+    // is the only place ordering is decided: each handler is a wrapper that
+    // destructures the tuple and sets `next_cursor: None`. Reaching a handler
+    // would mean constructing a `RequestContext<RoleServer>`, which needs a live
+    // peer — the same reason `run_tool_loop` exists as a separate function.
 
     /// Upstream that returns its catalogue in a *different* unsorted order on
     /// each `discover`, as a backend building it from a directory scan or a
@@ -1033,6 +1043,19 @@ mod tests {
             Self {
                 calls: AtomicUsize::new(0),
             }
+        }
+
+        /// A resource name ranked *inversely* to its URI, so that sorting the
+        /// resources by `name` instead of by `uri` yields exactly the reverse
+        /// sequence. True by construction, so the sort-key assertion below
+        /// cannot pass by accident.
+        fn inverse_ranked_name(uri_name: &str) -> String {
+            let rank = match uri_name {
+                "alpha" => 'c',
+                "beta" => 'b',
+                _ => 'a',
+            };
+            format!("{rank}_{uri_name}")
         }
     }
 
@@ -1062,12 +1085,8 @@ mod tests {
                 resources: order
                     .iter()
                     .map(|name| crate::protocol::UpstreamResourceDef {
-                        // Prefixed so the sort key is the URI, not the name:
-                        // sorting by the wrong field would order these
-                        // `mem://alpha, mem://beta, mem://gamma` anyway, so the
-                        // names are reversed against the URIs to tell them apart.
                         uri: format!("mem://{name}"),
-                        name: name.chars().rev().collect(),
+                        name: Self::inverse_ranked_name(name),
                         title: None,
                         description: None,
                         mime_type: None,
@@ -1117,6 +1136,15 @@ mod tests {
             vec!["mem://alpha", "mem://beta", "mem://gamma"],
             "resources must come back sorted by uri"
         );
+        // Pins the *key*, not just the order: the stub ranks each resource's
+        // name inversely to its URI, so a sort keyed on `name` would put these
+        // in the opposite sequence.
+        let resource_names: Vec<&str> = resources_a.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            resource_names,
+            vec!["c_alpha", "b_beta", "a_gamma"],
+            "resources are ordered by uri, so their names come out descending"
+        );
         assert_eq!(
             prompt_names(&prompts_a),
             vec!["alpha", "beta", "gamma"],
@@ -1139,22 +1167,6 @@ mod tests {
             prompt_names(&prompts_a),
             prompt_names(&prompts_b),
             "two discoveries must agree on prompt order"
-        );
-    }
-
-    /// Guards the sort *key* for resources. The stub reverses each resource's
-    /// name against its URI, so ordering by name instead of by URI would yield
-    /// the opposite sequence and this test would catch it.
-    #[tokio::test]
-    async fn discover_orders_resources_by_uri_not_name() {
-        let server = RoxyServer::new(ShufflingExecutor::new());
-        let (_, resources, _) = server.discover().await.expect("discovery succeeds");
-
-        let names: Vec<&str> = resources.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["ahpla", "ateb", "ammag"],
-            "resources are ordered by uri, so their names come out unsorted"
         );
     }
 }
