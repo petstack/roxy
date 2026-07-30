@@ -7,7 +7,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{DEFAULT_ALLOWED_HOSTS, host_validation_disabled};
+use crate::config::{DEFAULT_ALLOWED_HOSTS, host_validation_disabled, normalize_list};
 use crate::executor::UpstreamExecutor;
 use crate::server::RoxyServer;
 
@@ -23,10 +23,10 @@ pub type RoxyHttpService<E> = StreamableHttpService<RoxyServer<Arc<E>>, LocalSes
 ///
 /// - **`allowed_hosts`** — `Host` values to accept, normally from
 ///   [`crate::config::Config::allowed_hosts`]. A list containing `*` disables
-///   the check; an empty one falls back to
-///   [`crate::config::DEFAULT_ALLOWED_HOSTS`] rather than through to rmcp, where
-///   an empty list means "accept every host". This function is public API, so
-///   it enforces that itself instead of trusting its caller to.
+///   the check; one that is empty (or only blanks) falls back to
+///   [`crate::config::DEFAULT_ALLOWED_HOSTS`] rather than passing through to
+///   rmcp, where an empty list means "accept every host". This function is
+///   public API, so it enforces that itself instead of trusting its caller to.
 /// - **`max_body_bytes`** — inbound POST body cap, per `--max-body-size`.
 ///   Larger bodies get `413`.
 /// - **`legacy_session_mode`** stays at rmcp's default (`true`). It governs only
@@ -54,12 +54,16 @@ pub fn http_service<E: UpstreamExecutor + 'static>(
     let config = StreamableHttpServerConfig::default()
         .with_max_request_body_bytes(max_body_bytes)
         .with_cancellation_token(cancellation_token);
-    let config = if host_validation_disabled(allowed_hosts) {
+    // Blank entries are dropped here too, not just in `Config::allowed_hosts`:
+    // rmcp reads a blank as a host pattern that matches nothing, so a caller
+    // handing us `[""]` would reject every request.
+    let hosts = normalize_list(allowed_hosts.to_vec());
+    let config = if host_validation_disabled(&hosts) {
         config.disable_allowed_hosts()
-    } else if allowed_hosts.is_empty() {
+    } else if hosts.is_empty() {
         config.with_allowed_hosts(DEFAULT_ALLOWED_HOSTS)
     } else {
-        config.with_allowed_hosts(allowed_hosts.iter().map(String::as_str))
+        config.with_allowed_hosts(hosts)
     };
 
     StreamableHttpService::new(

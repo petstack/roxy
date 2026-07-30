@@ -160,14 +160,20 @@ async fn spawn_roxy() -> Roxy {
 }
 
 async fn spawn_roxy_with(config: Config) -> Roxy {
-    let cancel = CancellationToken::new();
     // `allowed_hosts()`, not the raw field: the normalization and the
     // loopback fallback are part of the policy, so the tests have to go
     // through the same accessor the binary does.
+    spawn_roxy_raw(config.allowed_hosts(), config.max_body_size).await
+}
+
+/// Hand `http_service` a host list verbatim, as an external caller of the
+/// library would — without `Config::allowed_hosts()` in between.
+async fn spawn_roxy_raw(allowed_hosts: Vec<String>, max_body_size: usize) -> Roxy {
+    let cancel = CancellationToken::new();
     let service = roxy::transport::http_service(
         Arc::new(StubUpstream),
-        &config.allowed_hosts(),
-        config.max_body_size,
+        &allowed_hosts,
+        max_body_size,
         cancel.child_token(),
     );
     let router = axum::Router::new().nest_service("/mcp", service);
@@ -868,6 +874,32 @@ async fn foreign_host_is_accepted_when_allowed() {
         response.status().is_success(),
         "a listed Host must be served, got HTTP {}",
         response.status()
+    );
+}
+
+/// `http_service` is public API, so it must not fail open when handed a list
+/// that carries no usable host — to rmcp, an empty list means "accept
+/// everything" and a blank entry means "match nothing". Goes through
+/// `spawn_roxy_raw` on purpose: `Config::allowed_hosts()` would fix the input
+/// before the transport ever saw it, which is the layer under test here.
+#[tokio::test]
+async fn empty_host_list_falls_back_to_loopback_rather_than_opening_up() {
+    let roxy = spawn_roxy_raw(vec![String::new(), "   ".to_string()], 4 * 1024 * 1024).await;
+
+    let foreign = roxy
+        .post(&initialize_body(LEGACY), &[("Host", "anything.invalid")])
+        .await;
+    assert_eq!(
+        foreign.status(),
+        403,
+        "a blank allow-list must not accept every host"
+    );
+
+    let loopback = roxy.post(&initialize_body(LEGACY), &[]).await;
+    assert!(
+        loopback.status().is_success(),
+        "…while loopback still works, got HTTP {}",
+        loopback.status()
     );
 }
 

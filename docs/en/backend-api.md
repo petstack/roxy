@@ -359,15 +359,28 @@ Sent when an elicitation form you asked for will not be answered — the user de
 
 | Field | Meaning |
 |---|---|
-| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user was involved**: roxy could not deliver the question to this client, so it gave up on your behalf. |
+| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user decided anything**: the exchange ended before an answer could come back. |
 | `context` | Whatever you put in your previous `elicit` response. |
 
-`"unsupported"` happens when the client cannot receive a mid-call question: it is
-on MCP `2026-07-28` (which replaced server-initiated elicitation with multi
-round-trip requests, not implemented yet), it sent a stateless request, or it
-never declared the `elicitation` capability. The client gets an error explaining
-which. Treat it as "ask differently", not as "the user refused" — metering it as
-user abandonment will misreport your funnel.
+`"unsupported"` covers every ending where nobody chose anything. Either the client
+could not be asked —
+
+- it is on MCP `2026-07-28`, which replaced server-initiated elicitation with
+  multi round-trip requests (not implemented yet);
+- it sent a stateless request, which has no channel for an answer;
+- its revision predates elicitation (before `2025-06-18`);
+- it did not declare support for **form** elicitation;
+
+— or it was asked and no answer arrived: it rejected or failed the request, or
+went away mid-prompt. One more case is your side: if the `schema` in your `elicit`
+response is not a valid elicitation schema, roxy cannot ask at all, and you get
+`"unsupported"` for that too.
+
+Whatever the cause, the meaning for you is the same: that form is over, drop its
+state. Do not read it as "the user refused" — metering it as user abandonment will
+misreport your funnel. If you see it constantly, check your own `schema` first,
+then which clients are reaching you; the client gets an error message naming the
+specific reason, and roxy logs it at `WARN`.
 
 ---
 

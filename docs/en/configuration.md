@@ -80,10 +80,11 @@ Two things `2026-07-28` does not have yet in roxy: multi round-trip elicitation
 still uses the server-initiated flow that `2026-07-28` removed, so asking the
 user a follow-up question needs a client that can receive one: `2025-06-18` …
 `2025-11-25`, running the `initialize` handshake (a stateless request has no
-channel for the answer), and declaring the `elicitation` capability. Any other
-client gets an error naming the reason instead of a call that never finishes, and
-your backend gets an `elicitation_cancelled` with `action: "unsupported"` so it
-can drop the pending form — see
+channel for the answer), and declaring support for **form** elicitation — URL
+mode alone is not enough, because roxy asks with a form. Any other client gets an
+error naming the reason instead of a call that never finishes, and your backend
+gets an `elicitation_cancelled` with `action: "unsupported"` so it can drop the
+pending form — see
 [The backend API](backend-api.md#elicitation_cancelled).
 
 ---

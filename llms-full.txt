@@ -331,10 +331,11 @@ Two things `2026-07-28` does not have yet in roxy: multi round-trip elicitation
 still uses the server-initiated flow that `2026-07-28` removed, so asking the
 user a follow-up question needs a client that can receive one: `2025-06-18` …
 `2025-11-25`, running the `initialize` handshake (a stateless request has no
-channel for the answer), and declaring the `elicitation` capability. Any other
-client gets an error naming the reason instead of a call that never finishes, and
-your backend gets an `elicitation_cancelled` with `action: "unsupported"` so it
-can drop the pending form — see
+channel for the answer), and declaring support for **form** elicitation — URL
+mode alone is not enough, because roxy asks with a form. Any other client gets an
+error naming the reason instead of a call that never finishes, and your backend
+gets an `elicitation_cancelled` with `action: "unsupported"` so it can drop the
+pending form — see
 [The backend API](backend-api.md#elicitation_cancelled).
 
 ---
@@ -774,15 +775,28 @@ Sent when an elicitation form you asked for will not be answered — the user de
 
 | Field | Meaning |
 |---|---|
-| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user was involved**: roxy could not deliver the question to this client, so it gave up on your behalf. |
+| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user decided anything**: the exchange ended before an answer could come back. |
 | `context` | Whatever you put in your previous `elicit` response. |
 
-`"unsupported"` happens when the client cannot receive a mid-call question: it is
-on MCP `2026-07-28` (which replaced server-initiated elicitation with multi
-round-trip requests, not implemented yet), it sent a stateless request, or it
-never declared the `elicitation` capability. The client gets an error explaining
-which. Treat it as "ask differently", not as "the user refused" — metering it as
-user abandonment will misreport your funnel.
+`"unsupported"` covers every ending where nobody chose anything. Either the client
+could not be asked —
+
+- it is on MCP `2026-07-28`, which replaced server-initiated elicitation with
+  multi round-trip requests (not implemented yet);
+- it sent a stateless request, which has no channel for an answer;
+- its revision predates elicitation (before `2025-06-18`);
+- it did not declare support for **form** elicitation;
+
+— or it was asked and no answer arrived: it rejected or failed the request, or
+went away mid-prompt. One more case is your side: if the `schema` in your `elicit`
+response is not a valid elicitation schema, roxy cannot ask at all, and you get
+`"unsupported"` for that too.
+
+Whatever the cause, the meaning for you is the same: that form is over, drop its
+state. Do not read it as "the user refused" — metering it as user abandonment will
+misreport your funnel. If you see it constantly, check your own `schema` first,
+then which clients are reaching you; the client gets an error message naming the
+specific reason, and roxy logs it at `WARN`.
 
 ---
 
@@ -910,7 +924,8 @@ A quick guide to the most common problems.
 | Clients get `403 Forbidden`, log says `rejected request with disallowed Host header` | The `Host` the client (or your reverse proxy) sent isn't in roxy's allow-list, which defaults to loopback only. | Add it: `--allowed-host mcp.example.com`. See [Configuration → HTTP](configuration.md#http). |
 | Clients get `413 Payload Too Large` | The request body exceeded `--max-body-size` (4 MiB by default). | Raise `--max-body-size`. |
 | A tool that asks follow-up questions returns "This tool needs more information, but this client's MCP revision replaced server-initiated elicitation with multi round-trip requests…" | The client is on MCP `2026-07-28`, or sent a stateless request: either way there is no channel to deliver the question. MRTR is not implemented yet. | Call that tool from a client on `2025-06-18` … `2025-11-25` that runs the `initialize` handshake. |
-| …or "…but the client did not declare the elicitation capability" | That client never advertised `elicitation` during `initialize`, and the spec forbids prompting it. | Use a client that declares the capability; if it does support elicitation, it has a bug worth reporting. |
+| …or "…but the client did not declare support for form elicitation" | The client advertised no `elicitation` capability at all, or advertised URL mode only. roxy asks with a form, and the spec forbids sending one to a client that did not say it can render one. | If it advertised nothing and does support forms, that is a client bug worth reporting. If it advertised `url` only, this tool needs a client that supports form mode. |
+| …or "…but this client's MCP revision predates elicitation, which arrived in 2025-06-18" | The client negotiated `2024-11-05` or `2025-03-26`, where `elicitation/create` does not exist. | Use a client on `2025-06-18` or later. |
 | TLS handshake error | The upstream's HTTPS certificate isn't trusted. | Install the CA, or (dev only) add `--upstream-insecure`. |
 
 Errors that happen mid-request are also returned to the MCP client as standard JSON-RPC errors, so the AI can report them to the user.

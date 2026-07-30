@@ -166,9 +166,9 @@ Not yet implemented for `2026-07-28`: multi round-trip elicitation (MRTR) and
 cache hints (`ttlMs` / `cacheScope`) on list results. Elicitation still uses the
 server-initiated flow, which `2026-07-28` removed, so a multi-step "ask the
 user" tool needs a client that runs the `initialize` handshake on
-`2025-06-18` … `2025-11-25` and declares the `elicitation` capability. Any other
-client gets an error explaining which of those it failed, rather than a call that
-never finishes. Everything else works on every revision.
+`2025-06-18` … `2025-11-25` and declares support for **form** elicitation. Any
+other client gets an error explaining which of those it failed, rather than a call
+that never finishes. Everything else works on every revision.
 
 ### Choosing a backend
 

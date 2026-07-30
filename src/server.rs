@@ -59,15 +59,22 @@ impl Elicitation {
     /// Two things independently rule a prompt out:
     ///
     /// - **No round trip.** `2026-07-28` removed server-initiated requests in
-    ///   favour of MRTR. Version alone is not the test, though: rmcp serves any
-    ///   request carrying the full inline-lifecycle `_meta` statelessly,
-    ///   *whatever* revision that `_meta` names, and a stateless request has no
-    ///   channel to route a client response back through. So a request that
-    ///   declares `2025-11-25` inline is just as undeliverable as a modern one —
-    ///   which is why `inline_lifecycle` is a separate input rather than being
-    ///   inferred from the revision. The revision arm still matters on its own:
-    ///   a client may declare `2026-07-28` in the `MCP-Protocol-Version` header
-    ///   with no `_meta` at all.
+    ///   favour of MRTR. Version alone is not the test, though: over HTTP, rmcp
+    ///   serves any request carrying the full inline-lifecycle `_meta`
+    ///   statelessly — *whatever* revision that `_meta` names — and a stateless
+    ///   request has no channel to route a client response back through. So a
+    ///   request that declares `2025-11-25` inline is just as undeliverable as a
+    ///   modern one, which is why `inline_lifecycle` is a separate input rather
+    ///   than being inferred from the revision. The revision arm still matters on
+    ///   its own: a client may declare `2026-07-28` in the
+    ///   `MCP-Protocol-Version` header with no `_meta` at all.
+    ///
+    ///   Under stdio an inline-lifecycle opener keeps a bidirectional peer, so a
+    ///   prompt would in fact be deliverable there. roxy cannot tell the two
+    ///   apart — the flag that would say so is `pub(crate)` in rmcp — so it
+    ///   declines to prompt in both cases. That costs a stdio client on an old
+    ///   revision the ability to elicit through the inline lifecycle, and buys
+    ///   never hanging a call; the alternative errs the other way.
     /// - **No elicitation at all.** It only exists from `2025-06-18` onward.
     /// - **No form support.** From `2025-06-18` the spec makes prompting a
     ///   client that did not declare `elicitation` a MUST NOT. roxy only sends
@@ -944,12 +951,26 @@ mod tests {
         calls: Arc<AtomicUsize>,
         cancellations: Cancellations,
         elicit_rounds: usize,
+        valid_schema: bool,
     }
 
     impl StubExecutor {
         /// Returns the executor, a handle to its `CallTool` counter, and a
         /// handle to the cancellations it was told about.
         fn new(elicit_rounds: usize) -> (Self, Arc<AtomicUsize>, Cancellations) {
+            Self::with_schema(elicit_rounds, true)
+        }
+
+        /// Same, but the `Elicit` response carries a schema that is not an
+        /// elicitation schema at all — a backend bug roxy cannot ask around.
+        fn with_invalid_schema() -> (Self, Arc<AtomicUsize>, Cancellations) {
+            Self::with_schema(usize::MAX, false)
+        }
+
+        fn with_schema(
+            elicit_rounds: usize,
+            valid_schema: bool,
+        ) -> (Self, Arc<AtomicUsize>, Cancellations) {
             let calls = Arc::new(AtomicUsize::new(0));
             let cancellations: Cancellations = Arc::default();
             (
@@ -957,6 +978,7 @@ mod tests {
                     calls: Arc::clone(&calls),
                     cancellations: Arc::clone(&cancellations),
                     elicit_rounds,
+                    valid_schema,
                 },
                 calls,
                 cancellations,
@@ -990,10 +1012,13 @@ mod tests {
             if prior < self.elicit_rounds {
                 Ok(UpstreamCallResult::Elicit(UpstreamElicitResponse {
                     message: "need more input".to_string(),
-                    // Minimal schema that deserializes into ElicitationSchema so
-                    // the loop reaches the prompt instead of erroring on an
-                    // invalid schema.
-                    schema: serde_json::json!({"type": "object", "properties": {}}),
+                    schema: if self.valid_schema {
+                        // Minimal schema that deserializes into
+                        // ElicitationSchema so the loop reaches the prompt.
+                        serde_json::json!({"type": "object", "properties": {}})
+                    } else {
+                        serde_json::json!("not-an-object")
+                    },
                     context: None,
                 }))
             } else {
@@ -1344,6 +1369,52 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "no further CallTool after a failed prompt"
+        );
+        assert_eq!(
+            *cancellations
+                .lock()
+                .expect("cancellation log is not poisoned"),
+            vec![ACTION_UNSUPPORTED.to_string()],
+            "the upstream must be told so it can drop the form it is holding"
+        );
+    }
+
+    /// The other half of the same obligation: when the upstream's own schema is
+    /// unusable, roxy never gets to ask — but the upstream is still holding the
+    /// form, so it is still told. The client is never prompted.
+    #[tokio::test]
+    async fn run_tool_loop_tells_the_upstream_when_its_schema_is_invalid() {
+        let (executor, calls, cancellations) = StubExecutor::with_invalid_schema();
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::new(ElicitationAction::Accept);
+
+        let request = tool_request("bad_schema");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-bad-schema",
+                ExecuteContext::default(),
+                &prompter,
+                Elicitation::ServerInitiated,
+            )
+            .await;
+
+        let err = result.expect_err("an unusable schema is a fault, not an error result");
+        assert!(
+            err.message.contains("invalid elicitation schema"),
+            "the error must name the cause, got: {}",
+            err.message
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            0,
+            "there is nothing to prompt with, so the client is not prompted"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no further CallTool after an unusable schema"
         );
         assert_eq!(
             *cancellations
