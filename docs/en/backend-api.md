@@ -60,6 +60,8 @@ flowchart TB
 
 Sent whenever an MCP client asks roxy to list tools, resources, or prompts. roxy does not cache the response — each `list_*` call from the client triggers a fresh `discover`, so changes you make to your backend's catalogue show up on the next listing without restarting roxy.
 
+**Order does not matter.** Return your tools, resources and prompts in whatever order is convenient — a directory scan, an unordered registry, a `SELECT` with no `ORDER BY`. roxy sorts them before they reach the client: tools and prompts by `name`, resources by `uri`. That matters because the tool list ends up in the model's prompt, and a list that shuffles between calls invalidates the client's prompt cache every time. You do not need to sort, and sorting differently on your side has no effect.
+
 **Request**
 
 ```json
