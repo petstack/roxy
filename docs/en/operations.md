@@ -112,7 +112,8 @@ A quick guide to the most common problems.
 | `invalid value 'TRUE' for '--upstream-insecure'` | Env variable only accepts lowercase `true` / `false`. | Use `true` or `false`. |
 | Clients get `403 Forbidden`, log says `rejected request with disallowed Host header` | The `Host` the client (or your reverse proxy) sent isn't in roxy's allow-list, which defaults to loopback only. | Add it: `--allowed-host mcp.example.com`. See [Configuration → HTTP](configuration.md#http). |
 | Clients get `413 Payload Too Large` | The request body exceeded `--max-body-size` (4 MiB by default). | Raise `--max-body-size`. |
-| A tool that asks follow-up questions returns "requires a server-initiated elicitation request" | The client negotiated MCP `2026-07-28`, which replaced server-initiated elicitation with multi round-trip requests — not implemented yet. | Call that tool from a client on `2025-06-18` … `2025-11-25`. |
+| A tool that asks follow-up questions returns "This tool needs more information, but this client's MCP revision replaced server-initiated elicitation with multi round-trip requests…" | The client is on MCP `2026-07-28`, or sent a stateless request: either way there is no channel to deliver the question. MRTR is not implemented yet. | Call that tool from a client on `2025-06-18` … `2025-11-25` that runs the `initialize` handshake. |
+| …or "…but the client did not declare the elicitation capability" | That client never advertised `elicitation` during `initialize`, and the spec forbids prompting it. | Use a client that declares the capability; if it does support elicitation, it has a bug worth reporting. |
 | TLS handshake error | The upstream's HTTPS certificate isn't trusted. | Install the CA, or (dev only) add `--upstream-insecure`. |
 
 Errors that happen mid-request are also returned to the MCP client as standard JSON-RPC errors, so the AI can report them to the user.

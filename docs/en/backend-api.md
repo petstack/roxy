@@ -42,7 +42,7 @@ flowchart TB
     E --> U[User fills form]
     U --> CT
 
-    EL -->|user cancels| EC[elicitation_cancelled]
+    EL -->|no answer coming| EC[elicitation_cancelled]
     EL -->|no| OK[returns content]
 ```
 
@@ -52,7 +52,7 @@ flowchart TB
 | `call_tool` | Whenever the AI invokes a tool | Run a tool and return a result. |
 | `read_resource` | Whenever the AI reads a resource | Fetch a resource by URI. |
 | `get_prompt` | Whenever the AI renders a prompt | Fill a prompt template with arguments. |
-| `elicitation_cancelled` | After a user declines an elicitation | Let the backend clean up any pending state. |
+| `elicitation_cancelled` | When an elicitation will not be answered — declined, cancelled, or undeliverable to that client | Let the backend clean up any pending state. |
 
 ---
 
@@ -342,7 +342,7 @@ Sent when the AI wants to render a prompt template.
 
 ## `elicitation_cancelled`
 
-Sent when a user declines or cancels an elicitation form you asked for. Use it to clean up pending state. roxy does not care what you return.
+Sent when an elicitation form you asked for will not be answered — the user declined or cancelled it, or roxy could not put the question to this client at all. Either way you are holding state for a form that is over, so this is your cue to drop it. roxy does not care what you return.
 
 **Request**
 
@@ -359,8 +359,15 @@ Sent when a user declines or cancels an elicitation form you asked for. Use it t
 
 | Field | Meaning |
 |---|---|
-| `action` | Either `"decline"` (user said no) or `"cancel"` (user closed the form). |
+| `action` | `"decline"` — the user said no. `"cancel"` — the user closed the form, or ended it in a way roxy does not recognise. `"unsupported"` — **no user was involved**: roxy could not deliver the question to this client, so it gave up on your behalf. |
 | `context` | Whatever you put in your previous `elicit` response. |
+
+`"unsupported"` happens when the client cannot receive a mid-call question: it is
+on MCP `2026-07-28` (which replaced server-initiated elicitation with multi
+round-trip requests, not implemented yet), it sent a stateless request, or it
+never declared the `elicitation` capability. The client gets an error explaining
+which. Treat it as "ask differently", not as "the user refused" — metering it as
+user abandonment will misreport your funnel.
 
 ---
 

@@ -5,7 +5,9 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use tracing::{info, warn};
 
-use roxy::config::{Config, LogFormat, Transport, UpstreamKind, normalize_list};
+use roxy::config::{
+    Config, LogFormat, Transport, UpstreamKind, host_validation_disabled, normalize_list,
+};
 use roxy::executor::UpstreamExecutor;
 use roxy::executor::fastcgi::FastCgiExecutor;
 use roxy::executor::http::HttpExecutor;
@@ -33,10 +35,6 @@ async fn main() -> anyhow::Result<()> {
     // (e.g. from a Kubernetes YAML `|-` block scalar) would reach
     // parse_header() as an empty string and fail with "invalid header format".
     config.upstream_header = normalize_list(std::mem::take(&mut config.upstream_header));
-    // Same for ROXY_ALLOWED_HOST, where a blank entry would be worse than
-    // spurious: rmcp treats it as a host pattern matching nothing, so an
-    // empty env var would reject every request instead of allowing any.
-    config.allowed_host = normalize_list(std::mem::take(&mut config.allowed_host));
 
     info!("roxy starting");
     info!("transport: {:?}", config.transport);
@@ -124,17 +122,18 @@ async fn run_http<E: UpstreamExecutor + 'static>(
     info!("starting HTTP/SSE transport on {addr}");
     // Worth a line in the log either way: a mismatch here surfaces as a bare
     // 403 with nothing pointing at the cause.
-    if config.allowed_host.is_empty() || config.allowed_host.iter().any(|host| host == "*") {
+    let allowed_hosts = config.allowed_hosts();
+    if host_validation_disabled(&allowed_hosts) {
         warn!("Host validation is disabled — every Host header is accepted");
     } else {
-        info!("accepted Host values: {}", config.allowed_host.join(", "));
+        info!("accepted Host values: {}", allowed_hosts.join(", "));
     }
 
     let ct = tokio_util::sync::CancellationToken::new();
 
     let service = http_service(
         executor,
-        &config.allowed_host,
+        &allowed_hosts,
         config.max_body_size,
         ct.child_token(),
     );

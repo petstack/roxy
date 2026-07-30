@@ -133,9 +133,12 @@ impl UpstreamExecutor for StubUpstream {
 
 /// roxy's own configuration defaults, read from the CLI parser rather than
 /// restated here, so these tests pin what a plain `roxy --transport http`
-/// actually serves.
+/// actually serves. The policy env vars are cleared for the parse, so a
+/// developer who exports them does not see confusing failures.
 fn default_config() -> Config {
-    Config::parse_from(["roxy", "--upstream", "http://127.0.0.1:1/mcp"])
+    temp_env::with_vars_unset(["ROXY_ALLOWED_HOST", "ROXY_MAX_BODY_SIZE"], || {
+        Config::parse_from(["roxy", "--upstream", "http://127.0.0.1:1/mcp"])
+    })
 }
 
 /// A roxy HTTP endpoint on an ephemeral loopback port. Dropping it cancels the
@@ -158,9 +161,12 @@ async fn spawn_roxy() -> Roxy {
 
 async fn spawn_roxy_with(config: Config) -> Roxy {
     let cancel = CancellationToken::new();
+    // `allowed_hosts()`, not the raw field: the normalization and the
+    // loopback fallback are part of the policy, so the tests have to go
+    // through the same accessor the binary does.
     let service = roxy::transport::http_service(
         Arc::new(StubUpstream),
-        &config.allowed_host,
+        &config.allowed_hosts(),
         config.max_body_size,
         cancel.child_token(),
     );
@@ -674,6 +680,39 @@ async fn modern_client_gets_an_error_instead_of_a_hanging_elicitation() {
     assert!(
         text.contains("multi round-trip"),
         "the message must explain why the tool cannot run, got: {text}"
+    );
+}
+
+/// The same hang is reachable without naming `2026-07-28`: a client that puts
+/// its revision in `_meta` instead of running `initialize` is served statelessly
+/// whatever revision it declares, so there is no channel to route a prompt's
+/// answer back through. Deliverability is a property of the request, not of the
+/// version string — this is the case a version-only check gets wrong.
+#[tokio::test]
+async fn inline_lifecycle_request_declaring_a_legacy_revision_still_gets_an_error() {
+    let roxy = spawn_roxy().await;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": ELICIT_TOOL,
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": LEGACY,
+                "io.modelcontextprotocol/clientInfo": {"name": "roxy-tests", "version": "0.0.0"},
+                "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}}
+            }
+        }
+    });
+
+    let call = roxy.call(&body, &[("MCP-Protocol-Version", LEGACY)]).await;
+
+    assert_eq!(
+        call["result"]["isError"],
+        json!(true),
+        "a stateless request cannot receive a prompt, whatever revision it declares, got: {call}"
     );
 }
 
