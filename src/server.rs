@@ -29,9 +29,14 @@ const REASON_NO_MRTR: &str = "this client's MCP revision replaced server-initiat
      with multi round-trip requests, which roxy does not implement yet (call the tool from a \
      client on MCP 2025-06-18 … 2025-11-25)";
 
-/// Reason text for a client that never declared the capability.
-const REASON_NO_CAPABILITY: &str = "the client did not declare the elicitation capability, so \
+/// Reason text for a client that never declared the capability, or declared it
+/// without form support.
+const REASON_NO_CAPABILITY: &str = "the client did not declare support for form elicitation, so \
      the MCP specification forbids prompting it";
+
+/// Reason text for a revision that predates elicitation entirely.
+const REASON_NO_ELICITATION: &str =
+    "this client's MCP revision predates elicitation, which arrived in 2025-06-18";
 
 /// Whether roxy may prompt this client in the middle of a tool call.
 ///
@@ -55,16 +60,20 @@ impl Elicitation {
     ///
     /// - **No round trip.** `2026-07-28` removed server-initiated requests in
     ///   favour of MRTR. Version alone is not the test, though: rmcp serves any
-    ///   request whose `_meta` carries the inline-lifecycle keys statelessly,
+    ///   request carrying the full inline-lifecycle `_meta` statelessly,
     ///   *whatever* revision that `_meta` names, and a stateless request has no
     ///   channel to route a client response back through. So a request that
     ///   declares `2025-11-25` inline is just as undeliverable as a modern one —
     ///   which is why `inline_lifecycle` is a separate input rather than being
-    ///   inferred from the revision.
-    /// - **No capability.** From `2025-06-18` the spec makes prompting a client
-    ///   that did not declare `elicitation` a MUST NOT, and a client that never
-    ///   declared it is unlikely to answer. `None` capabilities count as not
-    ///   declared.
+    ///   inferred from the revision. The revision arm still matters on its own:
+    ///   a client may declare `2026-07-28` in the `MCP-Protocol-Version` header
+    ///   with no `_meta` at all.
+    /// - **No elicitation at all.** It only exists from `2025-06-18` onward.
+    /// - **No form support.** From `2025-06-18` the spec makes prompting a
+    ///   client that did not declare `elicitation` a MUST NOT. roxy only sends
+    ///   *form* prompts, so a client declaring URL mode alone is no more
+    ///   promptable than one declaring nothing; per rmcp, an
+    ///   `ElicitationCapability` with neither mode set means form.
     ///
     /// A missing revision is treated as legacy: it means the peer never
     /// announced one, which only happens on the pre-`2026-07-28` handshake
@@ -79,7 +88,13 @@ impl Elicitation {
         if no_round_trip {
             return Self::Blocked(REASON_NO_MRTR);
         }
-        if capabilities.is_none_or(|capabilities| capabilities.elicitation.is_none()) {
+        if revision.is_some_and(|revision| *revision < ProtocolVersion::V_2025_06_18) {
+            return Self::Blocked(REASON_NO_ELICITATION);
+        }
+        let form_capable = capabilities
+            .and_then(|capabilities| capabilities.elicitation.as_ref())
+            .is_some_and(|elicitation| elicitation.form.is_some() || elicitation.url.is_none());
+        if !form_capable {
             return Self::Blocked(REASON_NO_CAPABILITY);
         }
         Self::ServerInitiated
@@ -90,12 +105,22 @@ impl Elicitation {
 enum Resolution {
     /// The user answered; feed the content back into the next upstream call.
     Answered(Option<serde_json::Value>),
-    /// No answer is coming: report `action` to the upstream and hand the client
-    /// `message`.
-    Terminal {
+    /// No answer is coming. The upstream is told `action` — so it can drop the
+    /// form it is holding — and then the client gets `outcome`.
+    Ended {
         action: &'static str,
-        message: String,
+        outcome: Ended,
     },
+}
+
+/// How a finished-without-an-answer elicitation is reported to the client.
+enum Ended {
+    /// A decision was made — by the user, or by roxy on their behalf. The tool
+    /// call itself succeeded in the protocol sense, carrying an error *result*.
+    Result(String),
+    /// roxy could not carry the exchange through at all. That is a fault, so it
+    /// surfaces as a JSON-RPC error.
+    Failed(McpError),
 }
 
 /// Decide what an upstream `Elicit` response resolves to, prompting the client
@@ -103,8 +128,13 @@ enum Resolution {
 ///
 /// Split out of [`RoxyServer::run_tool_loop`] so the loop body stays a
 /// dispatch: this function owns the round cap, the schema conversion, the one
-/// client-facing side effect, and the mapping from the user's action to the
-/// pair the loop needs.
+/// client-facing side effect, and the mapping from the outcome to what the loop
+/// has to do next.
+///
+/// Every way this ends without an answer resolves to [`Resolution::Ended`], so
+/// the caller always gets the chance to tell the upstream — the one exception is
+/// the round cap, which returns `Err` and is the *only* `Err` this function
+/// produces. See the comment on that branch for why it stays silent.
 async fn resolve_elicitation<P: ElicitationPrompter>(
     tool: &str,
     message: String,
@@ -115,18 +145,18 @@ async fn resolve_elicitation<P: ElicitationPrompter>(
 ) -> Result<Resolution, McpError> {
     if let Elicitation::Blocked(reason) = elicitation {
         warn!("tool {tool} requested elicitation, but {reason}; aborting the call");
-        return Ok(Resolution::Terminal {
+        return Ok(Resolution::Ended {
             action: ACTION_UNSUPPORTED,
-            message: format!("This tool needs more information, but {reason}."),
+            outcome: Ended::Result(format!("This tool needs more information, but {reason}.")),
         });
     }
 
     // Bound the loop *before* prompting the client again: a backend stuck
     // returning `Elicit` must not drive unbounded prompts or unbounded
-    // `elicitation_results` growth. On exceed we abandon the upstream's
-    // elicitation context (the same as the invalid-schema error path below)
-    // rather than sending a cancellation notification — that path is for a user
-    // decision, and mislabeling a roxy policy abort as one would be wrong.
+    // `elicitation_results` growth. This is the one exit that tells the upstream
+    // nothing, deliberately: the backend being aborted is the one misbehaving,
+    // and it is already ignoring the answers it gets, so there is nothing a
+    // notification would let it do. Every other exit reports.
     *rounds += 1;
     if *rounds > MAX_ELICITATION_ROUNDS {
         error!("elicitation exceeded {MAX_ELICITATION_ROUNDS} rounds for tool {tool}");
@@ -136,18 +166,40 @@ async fn resolve_elicitation<P: ElicitationPrompter>(
         ));
     }
 
-    let requested_schema: ElicitationSchema = serde_json::from_value(schema).map_err(|e| {
-        error!("invalid elicitation schema from upstream: {e}");
-        McpError::internal_error(format!("invalid elicitation schema: {e}"), None)
-    })?;
+    let requested_schema: ElicitationSchema = match serde_json::from_value(schema) {
+        Ok(schema) => schema,
+        Err(e) => {
+            // The upstream's own schema is unusable, so it never gets an answer
+            // — but it is still holding the form, so it is still told.
+            error!("invalid elicitation schema from upstream: {e}");
+            return Ok(Resolution::Ended {
+                action: ACTION_UNSUPPORTED,
+                outcome: Ended::Failed(McpError::internal_error(
+                    format!("invalid elicitation schema: {e}"),
+                    None,
+                )),
+            });
+        }
+    };
 
-    let result = prompter
+    let result = match prompter
         .prompt(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message,
             requested_schema,
         })
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // The prompt went out but produced no answer: the client rejected
+            // it, errored, or went away. Same obligation to the upstream.
+            return Ok(Resolution::Ended {
+                action: ACTION_UNSUPPORTED,
+                outcome: Ended::Failed(e),
+            });
+        }
+    };
 
     // `ElicitationAction` is `#[non_exhaustive]` in rmcp 3.x, so a future
     // revision may add actions. Anything that is not `Accept` carries no answer
@@ -167,9 +219,9 @@ async fn resolve_elicitation<P: ElicitationPrompter>(
             ("cancel", "Elicitation ended without an answer")
         }
     };
-    Ok(Resolution::Terminal {
+    Ok(Resolution::Ended {
         action,
-        message: message.to_string(),
+        outcome: Ended::Result(message.to_string()),
     })
 }
 
@@ -388,10 +440,13 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                             elicit_context = elicit_ctx;
                             // re-invoke the upstream with the accumulated results
                         }
-                        Resolution::Terminal { action, message } => {
+                        Resolution::Ended { action, outcome } => {
                             // No answer is coming, so tell the upstream: it is
                             // holding an elicitation context that would
-                            // otherwise leak until the client disconnects.
+                            // otherwise leak until the client disconnects. This
+                            // runs for every such ending — the user's decision,
+                            // a client roxy must not prompt, a prompt that
+                            // failed, a schema roxy could not read.
                             let cancel_request = UpstreamRequest::ElicitationCancelled {
                                 name: &request.name,
                                 action,
@@ -409,7 +464,12 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                                 );
                             }
 
-                            return Ok(CallToolResult::error(vec![ContentBlock::text(message)]));
+                            return match outcome {
+                                Ended::Result(message) => {
+                                    Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+                                }
+                                Ended::Failed(e) => Err(e),
+                            };
                         }
                     }
                 }
@@ -561,15 +621,19 @@ impl<E: UpstreamExecutor + 'static> ServerHandler for RoxyServer<E> {
         // completes in one response, and elicitation only works where a prompt
         // can actually be delivered — decided per request.
         //
-        // `context.meta.protocol_version()` is the inline-lifecycle signal:
-        // present only when the client put its revision in this request's
-        // `_meta` instead of an `initialize` handshake, which is what makes rmcp
-        // serve the request statelessly. `context.protocol_version()` falls back
-        // to the session's negotiated revision, so it cannot tell the two apart
-        // on its own.
+        // `missing_required_keys(V_2026_07_28).is_empty()` is rmcp's own
+        // inline-lifecycle predicate — the same check its transport uses to
+        // decide a request is served statelessly, which is what leaves no
+        // channel for a prompt's answer. `context.protocol_version()` cannot
+        // stand in for it: it falls back to the session's negotiated revision,
+        // so it reads the same for a legacy session and for an inline request
+        // that names a legacy revision.
         let elicitation = Elicitation::for_request(
             context.protocol_version().as_ref(),
-            context.meta.protocol_version().is_some(),
+            context
+                .meta
+                .missing_required_keys(&ProtocolVersion::V_2026_07_28)
+                .is_empty(),
             context.client_capabilities().as_ref(),
         );
         let result = self
@@ -948,10 +1012,12 @@ mod tests {
     }
 
     /// Stub client prompter: records how many times the client was prompted and
-    /// returns a fixed action (with dummy content for `Accept`).
+    /// returns a fixed action (with dummy content for `Accept`), or fails the
+    /// prompt outright, as a client that rejects `elicitation/create` or goes
+    /// away mid-prompt does.
     struct StubPrompter {
         prompts: Arc<AtomicUsize>,
-        action: ElicitationAction,
+        action: Option<ElicitationAction>,
     }
 
     impl StubPrompter {
@@ -961,7 +1027,19 @@ mod tests {
             (
                 Self {
                     prompts: Arc::clone(&prompts),
-                    action,
+                    action: Some(action),
+                },
+                prompts,
+            )
+        }
+
+        /// A prompter whose request never yields an answer.
+        fn failing() -> (Self, Arc<AtomicUsize>) {
+            let prompts = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    prompts: Arc::clone(&prompts),
+                    action: None,
                 },
                 prompts,
             )
@@ -971,8 +1049,14 @@ mod tests {
     impl ElicitationPrompter for StubPrompter {
         async fn prompt(&self, _params: ElicitRequestParams) -> Result<ElicitResult, McpError> {
             self.prompts.fetch_add(1, Ordering::SeqCst);
-            let mut result = ElicitResult::new(self.action.clone());
-            if matches!(self.action, ElicitationAction::Accept) {
+            let Some(action) = self.action.clone() else {
+                return Err(McpError::internal_error(
+                    "elicitation failed: no answer",
+                    None,
+                ));
+            };
+            let mut result = ElicitResult::new(action.clone());
+            if matches!(action, ElicitationAction::Accept) {
                 result = result.with_content(serde_json::json!({"answer": "yes"}));
             }
             Ok(result)
@@ -1223,7 +1307,55 @@ mod tests {
         );
     }
 
-    /// Client capabilities that declare elicitation, as a legacy client does.
+    /// A prompt that goes out but yields no answer still leaves the upstream
+    /// holding the form, so it is still told — with roxy's own action token,
+    /// since no user decided anything. The tool call itself fails, because this
+    /// is a fault rather than a decision.
+    #[tokio::test]
+    async fn run_tool_loop_tells_the_upstream_when_the_prompt_fails() {
+        let (executor, calls, cancellations) = StubExecutor::new(usize::MAX);
+        let server = RoxyServer::new(executor);
+        let (prompter, prompts) = StubPrompter::failing();
+
+        let request = tool_request("prompt_fails");
+        let result = server
+            .run_tool_loop(
+                &request,
+                None,
+                "req-prompt-failed",
+                ExecuteContext::default(),
+                &prompter,
+                Elicitation::ServerInitiated,
+            )
+            .await;
+
+        let err = result.expect_err("a failed prompt is a fault, not an error result");
+        assert!(
+            err.message.contains("elicitation failed"),
+            "the client must learn the prompt failed, got: {}",
+            err.message
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "the prompt was attempted exactly once"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no further CallTool after a failed prompt"
+        );
+        assert_eq!(
+            *cancellations
+                .lock()
+                .expect("cancellation log is not poisoned"),
+            vec![ACTION_UNSUPPORTED.to_string()],
+            "the upstream must be told so it can drop the form it is holding"
+        );
+    }
+
+    /// Client capabilities that declare form elicitation, as a legacy client
+    /// does.
     fn elicitation_capable() -> ClientCapabilities {
         ClientCapabilities::builder().enable_elicitation().build()
     }
@@ -1236,17 +1368,19 @@ mod tests {
     fn elicitation_is_blocked_unless_the_request_can_carry_a_prompt() {
         let capable = elicitation_capable();
 
+        for legacy in [ProtocolVersion::V_2025_06_18, ProtocolVersion::V_2025_11_25] {
+            assert_eq!(
+                Elicitation::for_request(Some(&legacy), false, Some(&capable)),
+                Elicitation::ServerInitiated,
+                "a {legacy} session can carry a server-initiated prompt"
+            );
+        }
         for legacy in [
             ProtocolVersion::V_2024_11_05,
             ProtocolVersion::V_2025_03_26,
             ProtocolVersion::V_2025_06_18,
             ProtocolVersion::V_2025_11_25,
         ] {
-            assert_eq!(
-                Elicitation::for_request(Some(&legacy), false, Some(&capable)),
-                Elicitation::ServerInitiated,
-                "a {legacy} session can carry a server-initiated prompt"
-            );
             assert_eq!(
                 Elicitation::for_request(Some(&legacy), true, Some(&capable)),
                 Elicitation::Blocked(REASON_NO_MRTR),
@@ -1255,10 +1389,22 @@ mod tests {
             );
         }
 
+        for inline in [false, true] {
+            assert_eq!(
+                Elicitation::for_request(
+                    Some(&ProtocolVersion::V_2026_07_28),
+                    inline,
+                    Some(&capable)
+                ),
+                Elicitation::Blocked(REASON_NO_MRTR),
+                "2026-07-28 replaced server-initiated requests with MRTR — including when the \
+                 revision arrives in the header alone, with no `_meta` (inline = {inline})"
+            );
+        }
         assert_eq!(
-            Elicitation::for_request(Some(&ProtocolVersion::V_2026_07_28), true, Some(&capable)),
+            Elicitation::for_request(None, true, Some(&capable)),
             Elicitation::Blocked(REASON_NO_MRTR),
-            "2026-07-28 replaced server-initiated requests with MRTR"
+            "an inline-lifecycle request is stateless even with no revision to compare"
         );
         assert_eq!(
             Elicitation::for_request(None, false, Some(&capable)),
@@ -1279,5 +1425,35 @@ mod tests {
             Elicitation::Blocked(REASON_NO_CAPABILITY),
             "capabilities without `elicitation` are a MUST NOT, not a maybe"
         );
+    }
+
+    /// roxy only sends *form* prompts, so URL mode alone is not promptable.
+    /// (The "neither mode set means form" case is `elicitation_capable()`, which
+    /// the matrix above already covers.)
+    #[test]
+    fn elicitation_requires_form_mode_specifically() {
+        let mut url_only = elicitation_capable();
+        url_only.elicitation =
+            Some(ElicitationCapability::new().with_url(UrlElicitationCapability::new()));
+
+        assert_eq!(
+            Elicitation::for_request(Some(&ProtocolVersion::V_2025_11_25), false, Some(&url_only)),
+            Elicitation::Blocked(REASON_NO_CAPABILITY),
+            "a url-only client cannot render the form roxy would send"
+        );
+    }
+
+    /// Elicitation arrived in `2025-06-18`; before that there is no
+    /// `elicitation/create` to send, whatever a client claims.
+    #[test]
+    fn elicitation_is_blocked_before_it_existed() {
+        let capable = elicitation_capable();
+        for ancient in [ProtocolVersion::V_2024_11_05, ProtocolVersion::V_2025_03_26] {
+            assert_eq!(
+                Elicitation::for_request(Some(&ancient), false, Some(&capable)),
+                Elicitation::Blocked(REASON_NO_ELICITATION),
+                "{ancient} predates elicitation"
+            );
+        }
     }
 }

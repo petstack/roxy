@@ -620,8 +620,13 @@ async fn modern_client_reads_resources_and_prompts() {
 /// SEP-2243 promotes `method` and `params.name` into headers so an intermediary
 /// can route without parsing the body, and requires the server to reject any
 /// disagreement between the two copies with `-32020`. roxy inherits that check
-/// from rmcp; this pins it, since a gateway that forwards those headers must
-/// never pass an unvalidated pair through.
+/// from rmcp; this pins it, since roxy forwards client headers to the backend and
+/// a mismatched pair must not be among them.
+///
+/// Scope note: rmcp validates `Mcp-Param-*` only when it can resolve a tool
+/// schema through `ServerHandler::get_tool`, which roxy does not implement (it
+/// discovers tools per request, and that hook is synchronous). Those headers
+/// therefore still reach the backend unvalidated — see issue 0025.
 #[tokio::test]
 async fn modern_header_body_mismatch_is_rejected() {
     let roxy = spawn_roxy().await;
@@ -713,6 +718,45 @@ async fn inline_lifecycle_request_declaring_a_legacy_revision_still_gets_an_erro
         call["result"]["isError"],
         json!(true),
         "a stateless request cannot receive a prompt, whatever revision it declares, got: {call}"
+    );
+    let text = call["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("error result carries text, got: {call}"));
+    assert!(
+        text.contains("multi round-trip"),
+        "it must fail for the round-trip reason, not some other error, got: {text}"
+    );
+}
+
+/// The other half of the same rule: a `2026-07-28` client that declares its
+/// revision in the header only, with no `_meta` at all, is still served
+/// statelessly — so the revision arm of the classifier has to stand on its own.
+#[tokio::test]
+async fn header_only_modern_request_gets_an_error_instead_of_a_hanging_elicitation() {
+    let roxy = spawn_roxy().await;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": ELICIT_TOOL, "arguments": {}}
+    });
+
+    let call = roxy
+        .call(&body, &modern_headers("tools/call", Some(ELICIT_TOOL)))
+        .await;
+
+    assert_eq!(
+        call["result"]["isError"],
+        json!(true),
+        "a header-only modern request is stateless too, got: {call}"
+    );
+    let text = call["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("error result carries text, got: {call}"));
+    assert!(
+        text.contains("multi round-trip"),
+        "it must fail for the round-trip reason, got: {text}"
     );
 }
 

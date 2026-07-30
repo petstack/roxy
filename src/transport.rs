@@ -7,7 +7,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::config::host_validation_disabled;
+use crate::config::{DEFAULT_ALLOWED_HOSTS, host_validation_disabled};
 use crate::executor::UpstreamExecutor;
 use crate::server::RoxyServer;
 
@@ -21,10 +21,12 @@ pub type RoxyHttpService<E> = StreamableHttpService<RoxyServer<Arc<E>>, LocalSes
 /// can reach roxy and rmcp 1.x had neither. Everything else is
 /// `StreamableHttpServerConfig::default()`, deliberately:
 ///
-/// - **`allowed_hosts`** — `Host` values to accept, from
-///   [`crate::config::Config::allowed_hosts`], which guarantees a non-empty
-///   list (an empty one would tell rmcp to accept every host). A list
-///   containing `*` disables the check.
+/// - **`allowed_hosts`** — `Host` values to accept, normally from
+///   [`crate::config::Config::allowed_hosts`]. A list containing `*` disables
+///   the check; an empty one falls back to
+///   [`crate::config::DEFAULT_ALLOWED_HOSTS`] rather than through to rmcp, where
+///   an empty list means "accept every host". This function is public API, so
+///   it enforces that itself instead of trusting its caller to.
 /// - **`max_body_bytes`** — inbound POST body cap, per `--max-body-size`.
 ///   Larger bodies get `413`.
 /// - **`legacy_session_mode`** stays at rmcp's default (`true`). It governs only
@@ -54,6 +56,8 @@ pub fn http_service<E: UpstreamExecutor + 'static>(
         .with_cancellation_token(cancellation_token);
     let config = if host_validation_disabled(allowed_hosts) {
         config.disable_allowed_hosts()
+    } else if allowed_hosts.is_empty() {
+        config.with_allowed_hosts(DEFAULT_ALLOWED_HOSTS)
     } else {
         config.with_allowed_hosts(allowed_hosts.iter().map(String::as_str))
     };
