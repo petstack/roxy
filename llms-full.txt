@@ -419,7 +419,7 @@ flowchart TB
 
 | `type` | Sent when | Purpose |
 |---|---|---|
-| `discover` | Once, at roxy startup | Ask the backend to list all tools, resources, and prompts. |
+| `discover` | On every `list_*` request | Ask the backend to list all tools, resources, and prompts. |
 | `call_tool` | Whenever the AI invokes a tool | Run a tool and return a result. |
 | `read_resource` | Whenever the AI reads a resource | Fetch a resource by URI. |
 | `get_prompt` | Whenever the AI renders a prompt | Fill a prompt template with arguments. |
@@ -430,6 +430,12 @@ flowchart TB
 ## `discover`
 
 Sent whenever an MCP client asks roxy to list tools, resources, or prompts. roxy does not cache the response — each `list_*` call from the client triggers a fresh `discover`, so changes you make to your backend's catalogue show up on the next listing without restarting roxy.
+
+**Your order does not matter — roxy imposes its own.** Return your tools, resources and prompts in whatever order is convenient (a directory scan, an unordered registry, a `SELECT` with no `ORDER BY`); roxy sorts them before they reach the client. Tools and prompts go by `name`, resources by `uri`, compared bytewise — so `DATA_EXPORT` sorts before `getUser`, because uppercase letters come first in ASCII. That is not roxy being broken; it is the property that makes the order reproducible.
+
+Why it is done for you: the tool list ends up inside the model's prompt, so a list that shuffles between calls invalidates the client's prompt cache every time — and roxy re-runs `discover` on every listing, so an incidental order would shuffle often.
+
+The trade-off, stated plainly: if you were curating tool order to steer which tool the model reaches for first, that lever is gone, and there is no flag to turn the sorting off. Use `name` and `description` to steer instead.
 
 **Request**
 

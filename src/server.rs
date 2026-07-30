@@ -76,7 +76,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             McpError::internal_error(format!("upstream discover error: {e}"), None)
         })?;
 
-        let tools = discover
+        let mut tools: Vec<Tool> = discover
             .tools
             .into_iter()
             .map(|t| {
@@ -92,7 +92,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        let resources = discover
+        let mut resources: Vec<Resource> = discover
             .resources
             .into_iter()
             .map(|r| {
@@ -110,7 +110,7 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
             })
             .collect();
 
-        let prompts = discover
+        let mut prompts: Vec<Prompt> = discover
             .prompts
             .into_iter()
             .map(|p| {
@@ -140,6 +140,32 @@ impl<E: UpstreamExecutor + 'static> RoxyServer<E> {
                 prompt
             })
             .collect();
+
+        // Order the catalogue in one place rather than in the three list
+        // handlers. All three sorts run on every list request — each handler
+        // calls `discover()` and drops the two vectors it did not ask for — which
+        // is fine next to the upstream round trip that just returned.
+        //
+        // MCP `2026-07-28` makes a deterministic `tools/list` order a SHOULD, for
+        // a concrete reason: the tool list is serialized into the model's prompt,
+        // so a reordering invalidates the client's prompt-prefix cache for the
+        // whole system prompt. Since roxy re-runs discovery per request, a
+        // backend whose catalogue order is incidental would hand the client a
+        // fresh permutation every time and it would never get a cache hit.
+        //
+        // Unstable rather than stable: roxy's backend contract requires unique
+        // names and URIs (MCP itself makes that a SHOULD, and only for tool
+        // names), so for any input the two produce the same output — and an
+        // unstable sort works in place where `sort_by` allocates a scratch
+        // buffer per list request. A backend that ships duplicates anyway just
+        // gets an arbitrary order among entries that `call_tool` could not have
+        // addressed separately.
+        //
+        // Comparison is bytewise, so the order is by code point: no locale, no
+        // platform variance — which is what makes it reproducible at all.
+        tools.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        resources.sort_unstable_by(|a, b| a.uri.cmp(&b.uri));
+        prompts.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
         Ok((tools, resources, prompts))
     }
@@ -1115,5 +1141,158 @@ mod tests {
     #[tokio::test]
     async fn run_tool_loop_stops_on_cancel() {
         assert_terminal_action(ElicitationAction::Cancel, "cancelled").await;
+    }
+
+    // --- Deterministic catalogue order (issue 0026) ---
+    //
+    // These target `discover()` rather than the `list_*` handlers because that
+    // is the only place ordering is decided: each handler is a wrapper that
+    // destructures the tuple and sets `next_cursor: None`. Reaching a handler
+    // would mean constructing a `RequestContext<RoleServer>`, which needs a live
+    // peer — the same reason `run_tool_loop` exists as a separate function.
+
+    /// Upstream that returns its catalogue in a *different* unsorted order on
+    /// each `discover`, as a backend building it from a directory scan or a
+    /// `SELECT` with no `ORDER BY` legitimately can. Neither permutation is
+    /// sorted, so any assertion that both calls come back sorted can only pass
+    /// if roxy did the sorting.
+    struct ShufflingExecutor {
+        calls: AtomicUsize,
+    }
+
+    impl ShufflingExecutor {
+        /// Two distinct permutations, indexed by call count.
+        const ORDERS: [[&'static str; 3]; 2] =
+            [["gamma", "alpha", "beta"], ["beta", "gamma", "alpha"]];
+
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        /// A resource name ranked *inversely* to its URI, so that sorting the
+        /// resources by `name` instead of by `uri` yields exactly the reverse
+        /// sequence. True by construction, so the sort-key assertion below
+        /// cannot pass by accident.
+        fn inverse_ranked_name(uri_name: &str) -> String {
+            let rank = match uri_name {
+                "alpha" => 'c',
+                "beta" => 'b',
+                _ => 'a',
+            };
+            format!("{rank}_{uri_name}")
+        }
+    }
+
+    impl UpstreamExecutor for ShufflingExecutor {
+        async fn execute(
+            &self,
+            _request: &UpstreamEnvelope<'_>,
+            _ctx: ExecuteContext<'_>,
+        ) -> anyhow::Result<UpstreamCallResult> {
+            anyhow::bail!("execute is not exercised by discover-order tests")
+        }
+
+        async fn discover(&self) -> anyhow::Result<UpstreamDiscoverResponse> {
+            let order =
+                Self::ORDERS[self.calls.fetch_add(1, Ordering::SeqCst) % Self::ORDERS.len()];
+            Ok(UpstreamDiscoverResponse {
+                tools: order
+                    .iter()
+                    .map(|name| crate::protocol::UpstreamToolDef {
+                        name: (*name).to_string(),
+                        title: None,
+                        description: None,
+                        input_schema: None,
+                        output_schema: None,
+                    })
+                    .collect(),
+                resources: order
+                    .iter()
+                    .map(|name| crate::protocol::UpstreamResourceDef {
+                        uri: format!("mem://{name}"),
+                        name: Self::inverse_ranked_name(name),
+                        title: None,
+                        description: None,
+                        mime_type: None,
+                    })
+                    .collect(),
+                prompts: order
+                    .iter()
+                    .map(|name| crate::protocol::UpstreamPromptDef {
+                        name: (*name).to_string(),
+                        title: None,
+                        description: None,
+                        arguments: vec![],
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    /// The guarantee `2026-07-28` asks for: whatever order the backend produces,
+    /// two consecutive discoveries hand the client the same, sorted catalogue —
+    /// so its prompt-prefix cache survives.
+    #[tokio::test]
+    async fn discover_orders_the_catalogue_deterministically() {
+        let server = RoxyServer::new(ShufflingExecutor::new());
+
+        let (tools_a, resources_a, prompts_a) =
+            server.discover().await.expect("first discovery succeeds");
+        let (tools_b, resources_b, prompts_b) =
+            server.discover().await.expect("second discovery succeeds");
+
+        let tool_names =
+            |tools: &[Tool]| -> Vec<String> { tools.iter().map(|t| t.name.to_string()).collect() };
+        let uris = |resources: &[Resource]| -> Vec<String> {
+            resources.iter().map(|r| r.uri.clone()).collect()
+        };
+        let prompt_names = |prompts: &[Prompt]| -> Vec<String> {
+            prompts.iter().map(|p| p.name.clone()).collect()
+        };
+
+        assert_eq!(
+            tool_names(&tools_a),
+            vec!["alpha", "beta", "gamma"],
+            "tools must come back sorted by name"
+        );
+        assert_eq!(
+            uris(&resources_a),
+            vec!["mem://alpha", "mem://beta", "mem://gamma"],
+            "resources must come back sorted by uri"
+        );
+        // Pins the *key*, not just the order: the stub ranks each resource's
+        // name inversely to its URI, so a sort keyed on `name` would put these
+        // in the opposite sequence.
+        let resource_names: Vec<&str> = resources_a.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            resource_names,
+            vec!["c_alpha", "b_beta", "a_gamma"],
+            "resources are ordered by uri, so their names come out descending"
+        );
+        assert_eq!(
+            prompt_names(&prompts_a),
+            vec!["alpha", "beta", "gamma"],
+            "prompts must come back sorted by name"
+        );
+
+        // The upstream returned a different permutation the second time, so this
+        // is the actual determinism claim, not a restatement of the above.
+        assert_eq!(
+            tool_names(&tools_a),
+            tool_names(&tools_b),
+            "two discoveries must agree on tool order"
+        );
+        assert_eq!(
+            uris(&resources_a),
+            uris(&resources_b),
+            "two discoveries must agree on resource order"
+        );
+        assert_eq!(
+            prompt_names(&prompts_a),
+            prompt_names(&prompts_b),
+            "two discoveries must agree on prompt order"
+        );
     }
 }
